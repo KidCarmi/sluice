@@ -115,6 +115,41 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/stats", h.handleStats)
 	mux.HandleFunc("GET /api/download/{id}", h.handleDownload)
 	mux.HandleFunc("GET /api/health", h.handleHealth)
+	mux.HandleFunc("GET /api/samples", h.handleSamples)
+}
+
+//go:embed samples
+var samplesFS embed.FS
+
+func (h *Handler) handleSamples(w http.ResponseWriter, r *http.Request) {
+	name := r.URL.Query().Get("name")
+	if name == "" {
+		// List available samples
+		entries, err := fs.ReadDir(samplesFS, "samples")
+		if err != nil {
+			h.jsonError(w, "reading samples: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		var names []string
+		for _, e := range entries {
+			if !e.IsDir() {
+				names = append(names, e.Name())
+			}
+		}
+		h.jsonResponse(w, map[string]interface{}{"samples": names}, http.StatusOK)
+		return
+	}
+
+	// Serve a specific sample file
+	name = filepath.Base(name) // prevent traversal
+	data, err := fs.ReadFile(samplesFS, "samples/"+name)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", name))
+	_, _ = w.Write(data)
 }
 
 func (h *Handler) handleSanitize(w http.ResponseWriter, r *http.Request) {

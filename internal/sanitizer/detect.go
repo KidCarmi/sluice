@@ -16,6 +16,9 @@ const (
 	FileTypeDOCX    FileType = "docx"
 	FileTypeXLSX    FileType = "xlsx"
 	FileTypePPTX    FileType = "pptx"
+	FileTypeJPEG    FileType = "jpeg"
+	FileTypePNG     FileType = "png"
+	FileTypeGIF     FileType = "gif"
 	FileTypeUnknown FileType = "unknown"
 )
 
@@ -28,6 +31,16 @@ var magicPDF = []byte("%PDF")
 
 // magicZIP is the local-file-header signature for ZIP (PK\x03\x04).
 var magicZIP = []byte{0x50, 0x4B, 0x03, 0x04}
+
+// magicJPEG is the SOI (Start of Image) marker for JPEG files.
+var magicJPEG = []byte{0xFF, 0xD8, 0xFF}
+
+// magicPNG is the 8-byte signature for PNG files.
+var magicPNG = []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A}
+
+// magicGIF87a and magicGIF89a are the two GIF version signatures.
+var magicGIF87a = []byte("GIF87a")
+var magicGIF89a = []byte("GIF89a")
 
 // DetectType identifies the file type by inspecting magic bytes first and
 // falling back to the file extension when the magic bytes are inconclusive.
@@ -47,6 +60,15 @@ func detectByMagic(data []byte) FileType {
 	}
 	if bytes.HasPrefix(data, magicZIP) {
 		return detectOOXML(data)
+	}
+	if bytes.HasPrefix(data, magicJPEG) {
+		return FileTypeJPEG
+	}
+	if bytes.HasPrefix(data, magicPNG) {
+		return FileTypePNG
+	}
+	if bytes.HasPrefix(data, magicGIF87a) || bytes.HasPrefix(data, magicGIF89a) {
+		return FileTypeGIF
 	}
 	return FileTypeUnknown
 }
@@ -103,6 +125,12 @@ func detectByExtension(filename string) FileType {
 		return FileTypeXLSX
 	case "pptx":
 		return FileTypePPTX
+	case "jpg", "jpeg":
+		return FileTypeJPEG
+	case "png":
+		return FileTypePNG
+	case "gif":
+		return FileTypeGIF
 	default:
 		return FileTypeUnknown
 	}
@@ -112,7 +140,8 @@ func detectByExtension(filename string) FileType {
 // engine knows how to sanitize.
 func IsSupportedType(ft FileType) bool {
 	switch ft {
-	case FileTypePDF, FileTypeDOCX, FileTypeXLSX, FileTypePPTX:
+	case FileTypePDF, FileTypeDOCX, FileTypeXLSX, FileTypePPTX,
+		FileTypeJPEG, FileTypePNG, FileTypeGIF:
 		return true
 	default:
 		return false

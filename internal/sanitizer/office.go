@@ -233,7 +233,7 @@ func readZIPEntry(f *zip.File) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open: %w", err)
 	}
-	defer rc.Close()
+	defer func() { _ = rc.Close() }()
 
 	lr := io.LimitReader(rc, maxEntrySize+1)
 	content, err := io.ReadAll(lr)

@@ -131,7 +131,7 @@ func (h *Handler) handleSanitize(w http.ResponseWriter, r *http.Request) {
 	}
 	defer func() {
 		if r.MultipartForm != nil {
-			r.MultipartForm.RemoveAll()
+			_ = r.MultipartForm.RemoveAll()
 		}
 	}()
 
@@ -140,7 +140,7 @@ func (h *Handler) handleSanitize(w http.ResponseWriter, r *http.Request) {
 		h.jsonError(w, "no file provided", http.StatusBadRequest)
 		return
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 
 	// Read file with size limit via io.LimitReader
 	data, err := io.ReadAll(io.LimitReader(file, h.maxFileSize+1))
@@ -205,7 +205,7 @@ func (h *Handler) handleSanitize(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Store sanitized file for download if we have data
-	if result.SanitizedData != nil && len(result.SanitizedData) > 0 {
+	if len(result.SanitizedData) > 0 {
 		id := fmt.Sprintf("%d", time.Now().UnixNano())
 		h.mu.Lock()
 		h.downloads[id] = &downloadEntry{
@@ -250,7 +250,7 @@ func (h *Handler) handleDownload(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", entry.filename))
-	w.Write(entry.data)
+	_, _ = w.Write(entry.data)
 }
 
 func (h *Handler) handleHealth(w http.ResponseWriter, _ *http.Request) {
@@ -264,7 +264,7 @@ func (h *Handler) handleHealth(w http.ResponseWriter, _ *http.Request) {
 func (h *Handler) jsonResponse(w http.ResponseWriter, data interface{}, status int) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(data)
+	_ = json.NewEncoder(w).Encode(data)
 }
 
 func (h *Handler) jsonError(w http.ResponseWriter, message string, status int) {

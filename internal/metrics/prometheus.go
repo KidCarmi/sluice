@@ -65,9 +65,9 @@ func (m *Metrics) Handler() http.Handler {
 		for label1, inner := range m.FilesProcessed.counts {
 			for label2, val := range inner {
 				if label2 == "" {
-					fmt.Fprintf(w, "sluice_files_processed_total{type=%q} %d\n", label1, val.Load())
+					_, _ = fmt.Fprintf(w, "sluice_files_processed_total{type=%q} %d\n", label1, val.Load())
 				} else {
-					fmt.Fprintf(w, "sluice_files_processed_total{type=%q,result=%q} %d\n", label1, label2, val.Load())
+					_, _ = fmt.Fprintf(w, "sluice_files_processed_total{type=%q,result=%q} %d\n", label1, label2, val.Load())
 				}
 			}
 		}
@@ -77,24 +77,24 @@ func (m *Metrics) Handler() http.Handler {
 		m.ThreatsRemoved.mu.RLock()
 		for label1, inner := range m.ThreatsRemoved.counts {
 			for _, val := range inner {
-				fmt.Fprintf(w, "sluice_threats_removed_total{type=%q} %d\n", label1, val.Load())
+				_, _ = fmt.Fprintf(w, "sluice_threats_removed_total{type=%q} %d\n", label1, val.Load())
 			}
 		}
 		m.ThreatsRemoved.mu.RUnlock()
 
 		// Duration histogram
 		for i, bucket := range m.SanitizeDuration.buckets {
-			fmt.Fprintf(w, "sluice_sanitize_duration_seconds_bucket{le=\"%.2f\"} %d\n", bucket, m.SanitizeDuration.counts[i].Load())
+			_, _ = fmt.Fprintf(w, "sluice_sanitize_duration_seconds_bucket{le=\"%.2f\"} %d\n", bucket, m.SanitizeDuration.counts[i].Load())
 		}
-		fmt.Fprintf(w, "sluice_sanitize_duration_seconds_count %d\n", m.SanitizeDuration.count.Load())
+		_, _ = fmt.Fprintf(w, "sluice_sanitize_duration_seconds_count %d\n", m.SanitizeDuration.count.Load())
 
 		// Gauges
-		fmt.Fprintf(w, "sluice_active_workers %d\n", m.ActiveWorkers.Load())
-		fmt.Fprintf(w, "sluice_queue_depth %d\n", m.QueueDepth.Load())
+		_, _ = fmt.Fprintf(w, "sluice_active_workers %d\n", m.ActiveWorkers.Load())
+		_, _ = fmt.Fprintf(w, "sluice_queue_depth %d\n", m.QueueDepth.Load())
 
 		// File size histogram
 		for i, bucket := range m.FileSize.buckets {
-			fmt.Fprintf(w, "sluice_file_size_bytes_bucket{le=\"%.0f\"} %d\n", bucket, m.FileSize.counts[i].Load())
+			_, _ = fmt.Fprintf(w, "sluice_file_size_bytes_bucket{le=\"%.0f\"} %d\n", bucket, m.FileSize.counts[i].Load())
 		}
 	})
 }

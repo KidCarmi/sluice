@@ -21,9 +21,9 @@ func makeTestZIP(entries map[string]string) []byte {
 	w := zip.NewWriter(&buf)
 	for name, content := range entries {
 		f, _ := w.Create(name)
-		f.Write([]byte(content))
+		_, _ = f.Write([]byte(content))
 	}
-	w.Close()
+	_ = w.Close()
 	return buf.Bytes()
 }
 
@@ -70,7 +70,7 @@ func newTestServer(t *testing.T, maxFileSize int64) (*Server, string) {
 	}
 	addr := ln.Addr().String()
 	// We need to close this listener because ListenAndServe creates its own.
-	ln.Close()
+	_ = ln.Close()
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -82,7 +82,7 @@ func newTestServer(t *testing.T, maxFileSize int64) (*Server, string) {
 	for time.Now().Before(deadline) {
 		conn, err := net.DialTimeout("tcp", addr, 50*time.Millisecond)
 		if err == nil {
-			conn.Close()
+			_ = conn.Close()
 			return srv, addr
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -99,10 +99,10 @@ func sendRequest(t *testing.T, addr string, req SanitizeRequestJSON) SanitizeRes
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	// Set a deadline so the test does not hang forever.
-	conn.SetDeadline(time.Now().Add(10 * time.Second))
+	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
 
 	data, err := json.Marshal(req)
 	if err != nil {
@@ -138,7 +138,7 @@ func sendRequest(t *testing.T, addr string, req SanitizeRequestJSON) SanitizeRes
 
 func TestServerSanitize(t *testing.T) {
 	srv, addr := newTestServer(t, 10*1024*1024)
-	defer srv.Stop()
+	defer func() { _ = srv.Stop() }()
 
 	docxData := makeTestZIP(minimalDOCX())
 	req := SanitizeRequestJSON{
@@ -181,7 +181,7 @@ func TestServerSanitize(t *testing.T) {
 
 func TestServerSanitizeWithThreats(t *testing.T) {
 	srv, addr := newTestServer(t, 10*1024*1024)
-	defer srv.Stop()
+	defer func() { _ = srv.Stop() }()
 
 	entries := minimalDOCX()
 	entries["word/vbaProject.bin"] = "VBA_MACRO_BINARY_DATA"
@@ -249,7 +249,7 @@ func TestServerHealth(t *testing.T) {
 func TestServerOversizeFile(t *testing.T) {
 	maxSize := int64(1024) // 1 KB limit
 	srv, addr := newTestServer(t, maxSize)
-	defer srv.Stop()
+	defer func() { _ = srv.Stop() }()
 
 	// Create a file larger than the max.
 	bigData := bytes.Repeat([]byte("A"), int(maxSize)+1)
@@ -274,15 +274,15 @@ func TestServerOversizeFile(t *testing.T) {
 
 func TestServerInvalidJSON(t *testing.T) {
 	srv, addr := newTestServer(t, 10*1024*1024)
-	defer srv.Stop()
+	defer func() { _ = srv.Stop() }()
 
 	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
-	conn.SetDeadline(time.Now().Add(5 * time.Second))
+	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
 
 	// Send garbage followed by a newline.
 	garbage := []byte("this is not valid json at all!!!\n")
@@ -330,7 +330,7 @@ func TestServerGracefulShutdown(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial before shutdown: %v", err)
 	}
-	conn.Close()
+	_ = conn.Close()
 
 	// Stop the server.
 	if err := srv.Stop(); err != nil {
@@ -346,7 +346,7 @@ func TestServerGracefulShutdown(t *testing.T) {
 
 func TestServerUnsupportedFileType(t *testing.T) {
 	srv, addr := newTestServer(t, 10*1024*1024)
-	defer srv.Stop()
+	defer func() { _ = srv.Stop() }()
 
 	req := SanitizeRequestJSON{
 		Filename:  "image.bmp",
@@ -366,7 +366,7 @@ func TestServerUnsupportedFileType(t *testing.T) {
 
 func TestServerBadBase64(t *testing.T) {
 	srv, addr := newTestServer(t, 10*1024*1024)
-	defer srv.Stop()
+	defer func() { _ = srv.Stop() }()
 
 	req := SanitizeRequestJSON{
 		Filename:  "test.docx",
@@ -386,7 +386,7 @@ func TestServerBadBase64(t *testing.T) {
 
 func TestServerConcurrentRequests(t *testing.T) {
 	srv, addr := newTestServer(t, 10*1024*1024)
-	defer srv.Stop()
+	defer func() { _ = srv.Stop() }()
 
 	docxData := makeTestZIP(minimalDOCX())
 	encoded := base64.StdEncoding.EncodeToString(docxData)
@@ -407,8 +407,8 @@ func TestServerConcurrentRequests(t *testing.T) {
 				errCh <- fmt.Errorf("client %d dial: %w", id, err)
 				return
 			}
-			defer conn.Close()
-			conn.SetDeadline(time.Now().Add(10 * time.Second))
+			defer func() { _ = conn.Close() }()
+			_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
 
 			data, _ := json.Marshal(req)
 			data = append(data, '\n')

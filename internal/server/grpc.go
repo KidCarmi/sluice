@@ -117,7 +117,7 @@ func (s *Server) ListenAndServe(addr string) error {
 			continue
 		}
 		if s.stopped.Load() {
-			conn.Close()
+			_ = conn.Close()
 			return nil
 		}
 		s.connWg.Add(1)
@@ -161,7 +161,7 @@ func (s *Server) Stop() error {
 // the connection.
 func (s *Server) handleConn(conn net.Conn) {
 	defer s.connWg.Done()
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
 	defer cancel()

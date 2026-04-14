@@ -25,9 +25,9 @@ func makeTestZIP(entries map[string]string) []byte {
 	w := zip.NewWriter(&buf)
 	for name, content := range entries {
 		f, _ := w.Create(name)
-		f.Write([]byte(content))
+		_, _ = f.Write([]byte(content))
 	}
-	w.Close()
+	_ = w.Close()
 	return buf.Bytes()
 }
 
@@ -59,8 +59,8 @@ func createMultipartFile(t *testing.T, fieldname, filename string, data []byte) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	part.Write(data)
-	w.Close()
+	_, _ = part.Write(data)
+	_ = w.Close()
 	return &buf, w.FormDataContentType()
 }
 
@@ -88,7 +88,7 @@ func TestHealthEndpoint(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET /api/health: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
@@ -120,7 +120,7 @@ func TestStatsEndpoint(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET /api/stats: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
@@ -146,7 +146,7 @@ func TestSanitizeEndpoint_NoFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("POST /api/sanitize: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d", resp.StatusCode)
@@ -172,7 +172,7 @@ func TestSanitizeEndpoint_CleanFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("POST /api/sanitize: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(resp.Body)
@@ -206,7 +206,7 @@ func TestSanitizeEndpoint_WithThreats(t *testing.T) {
 	if err != nil {
 		t.Fatalf("POST /api/sanitize: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(resp.Body)
@@ -257,7 +257,7 @@ func TestStatsAfterSanitize(t *testing.T) {
 	if err != nil {
 		t.Fatalf("POST /api/sanitize (clean): %v", err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200 for clean sanitize, got %d", resp.StatusCode)
@@ -272,7 +272,7 @@ func TestStatsAfterSanitize(t *testing.T) {
 	if err != nil {
 		t.Fatalf("POST /api/sanitize (dirty): %v", err)
 	}
-	resp2.Body.Close()
+	_ = resp2.Body.Close()
 
 	if resp2.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200 for dirty sanitize, got %d", resp2.StatusCode)
@@ -283,7 +283,7 @@ func TestStatsAfterSanitize(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET /api/stats: %v", err)
 	}
-	defer statsResp.Body.Close()
+	defer func() { _ = statsResp.Body.Close() }()
 
 	var stats StatsJSON
 	if err := json.NewDecoder(statsResp.Body).Decode(&stats); err != nil {
@@ -314,7 +314,7 @@ func TestStaticFiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET /: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
@@ -344,7 +344,7 @@ func TestDownloadEndpoint(t *testing.T) {
 	if err != nil {
 		t.Fatalf("POST /api/sanitize: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	var result SanitizeResponseJSON
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
@@ -360,7 +360,7 @@ func TestDownloadEndpoint(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET /api/download: %v", err)
 	}
-	defer dlResp.Body.Close()
+	defer func() { _ = dlResp.Body.Close() }()
 
 	if dlResp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", dlResp.StatusCode)
@@ -398,7 +398,7 @@ func TestDownloadEndpoint_NotFound(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET /api/download: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("expected 404, got %d", resp.StatusCode)

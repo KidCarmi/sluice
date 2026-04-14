@@ -102,7 +102,7 @@ func TestBackpressure(t *testing.T) {
 	// in-flight jobs before backpressure kicks in.
 	for i := 0; i < queueDepth; i++ {
 		go func(i int) {
-			pool.Submit(context.Background(), Job{ID: fmt.Sprintf("fill-%d", i)})
+			_, _ = pool.Submit(context.Background(), Job{ID: fmt.Sprintf("fill-%d", i)})
 		}(i)
 	}
 
@@ -175,7 +175,7 @@ func TestGracefulShutdown(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			pool.Submit(context.Background(), Job{ID: fmt.Sprintf("job-%d", i)})
+			_, _ = pool.Submit(context.Background(), Job{ID: fmt.Sprintf("job-%d", i)})
 		}(i)
 	}
 
@@ -205,7 +205,7 @@ func TestActiveWorkersCounter(t *testing.T) {
 
 	// Submit 3 blocking jobs.
 	for i := 0; i < 3; i++ {
-		go pool.Submit(context.Background(), Job{ID: fmt.Sprintf("block-%d", i)})
+		go func(i int) { _, _ = pool.Submit(context.Background(), Job{ID: fmt.Sprintf("block-%d", i)}) }(i)
 	}
 
 	// Wait for workers to spin up.

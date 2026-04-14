@@ -14,9 +14,9 @@ func makeTestZIP(entries map[string]string) []byte {
 	w := zip.NewWriter(&buf)
 	for name, content := range entries {
 		f, _ := w.Create(name)
-		f.Write([]byte(content))
+		_, _ = f.Write([]byte(content))
 	}
-	w.Close()
+	_ = w.Close()
 	return buf.Bytes()
 }
 

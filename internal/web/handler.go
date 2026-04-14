@@ -219,6 +219,12 @@ func (h *Handler) handleSanitize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if jobResult == nil {
+		h.stats.FilesProcessed.Add(1)
+		h.stats.FilesErrored.Add(1)
+		h.jsonError(w, "sanitization produced no result", http.StatusInternalServerError)
+		return
+	}
 	result, ok := jobResult.Result.(*sanitizer.Result)
 	if !ok || result == nil {
 		h.stats.FilesProcessed.Add(1)

@@ -92,6 +92,7 @@ func (s *SVGSanitizer) Sanitize(ctx context.Context, data []byte, filename strin
 	var threats []Threat
 	var out bytes.Buffer
 	decoder := xml.NewDecoder(bytes.NewReader(bounded))
+	decoder.Entity = map[string]string{} // disable external entity resolution (XXE)
 	decoder.Strict = false
 	decoder.AutoClose = xml.HTMLAutoClose
 	encoder := xml.NewEncoder(&out)
@@ -138,15 +139,6 @@ func (s *SVGSanitizer) Sanitize(ctx context.Context, data []byte, filename strin
 					Severity:    info.severity,
 				})
 				continue
-			}
-
-			// Check <use> elements with external references.
-			if localLower == "use" {
-				if stripped, threat := checkUseExternal(t); stripped {
-					skipDepth = 1
-					threats = append(threats, threat)
-					continue
-				}
 			}
 
 			// Check <style> elements — we need to buffer their content
@@ -319,6 +311,28 @@ func looksLikeSVG(data []byte) bool {
 	return strings.Contains(prefix, "<svg") || strings.Contains(prefix, "<?xml")
 }
 
+// javascriptURIAttrs is the set of attributes that must be checked for
+// javascript: URI schemes on all elements.
+var javascriptURIAttrs = map[string]bool{
+	"href":       true,
+	"xlink:href": true,
+	"src":        true,
+	"data":       true,
+	"action":     true,
+	"formaction": true,
+	"poster":     true,
+	"background": true,
+}
+
+// dangerousInlineStylePatterns lists substrings in inline style attributes
+// that signal an attack vector.
+var dangerousInlineStylePatterns = []string{
+	"expression(",
+	"javascript:",
+	"-moz-binding",
+	"behavior:",
+}
+
 // filterAttributes removes dangerous attributes from an element and returns
 // the cleaned attribute slice plus any threats found.
 func filterAttributes(elem xml.StartElement) ([]xml.Attr, []Threat) {
@@ -327,6 +341,17 @@ func filterAttributes(elem xml.StartElement) ([]xml.Attr, []Threat) {
 
 	for _, attr := range elem.Attr {
 		nameLower := strings.ToLower(attr.Name.Local)
+
+		// Resolve the full attribute name including namespace prefix.
+		fullNameLower := nameLower
+		if attr.Name.Space != "" {
+			// For xlink:href the Space is the namespace URI; also check
+			// the raw prefix form used by some SVGs.
+			spaceLower := strings.ToLower(attr.Name.Space)
+			if strings.Contains(spaceLower, "xlink") || spaceLower == "xlink" {
+				fullNameLower = "xlink:" + nameLower
+			}
+		}
 
 		// Strip all on* event handlers.
 		if strings.HasPrefix(nameLower, "on") && len(nameLower) > 2 {
@@ -339,20 +364,56 @@ func filterAttributes(elem xml.StartElement) ([]xml.Attr, []Threat) {
 			continue
 		}
 
-		// Strip href/xlink:href with javascript: URIs.
-		if nameLower == "href" {
+		// Strip javascript: URIs on all relevant attributes.
+		if javascriptURIAttrs[fullNameLower] || javascriptURIAttrs[nameLower] {
 			valLower := strings.ToLower(strings.TrimSpace(attr.Value))
 			if strings.HasPrefix(valLower, "javascript:") {
 				threats = append(threats, Threat{
 					Type:        "javascript_uri",
-					Location:    fmt.Sprintf("href attribute on <%s>", elem.Name.Local),
-					Description: "javascript: URI in href attribute stripped",
+					Location:    fmt.Sprintf("%s attribute on <%s>", attr.Name.Local, elem.Name.Local),
+					Description: fmt.Sprintf("javascript: URI in %s attribute stripped", attr.Name.Local),
 					Severity:    "critical",
 				})
-				// Replace with empty href instead of removing entirely.
+				// Replace with empty value instead of removing entirely.
 				attr.Value = ""
 				clean = append(clean, attr)
 				continue
+			}
+		}
+
+		// Strip external references (http:// / https://) on href and
+		// xlink:href for all elements, not just <use>.
+		if fullNameLower == "href" || fullNameLower == "xlink:href" || nameLower == "href" {
+			valLower := strings.ToLower(strings.TrimSpace(attr.Value))
+			if strings.HasPrefix(valLower, "http://") || strings.HasPrefix(valLower, "https://") {
+				threats = append(threats, Threat{
+					Type:        "external_ref",
+					Location:    fmt.Sprintf("%s attribute on <%s>", attr.Name.Local, elem.Name.Local),
+					Description: fmt.Sprintf("External reference %q stripped", attr.Value),
+					Severity:    "medium",
+				})
+				continue // strip the attribute entirely
+			}
+		}
+
+		// Strip inline style attributes containing dangerous CSS.
+		if nameLower == "style" {
+			valLower := strings.ToLower(attr.Value)
+			dangerous := false
+			for _, pat := range dangerousInlineStylePatterns {
+				if strings.Contains(valLower, pat) {
+					dangerous = true
+					break
+				}
+			}
+			if dangerous {
+				threats = append(threats, Threat{
+					Type:        "dangerous_css",
+					Location:    fmt.Sprintf("style attribute on <%s>", elem.Name.Local),
+					Description: "Dangerous CSS in inline style attribute stripped",
+					Severity:    "high",
+				})
+				continue // strip the attribute entirely
 			}
 		}
 
@@ -360,27 +421,6 @@ func filterAttributes(elem xml.StartElement) ([]xml.Attr, []Threat) {
 	}
 
 	return clean, threats
-}
-
-// checkUseExternal checks if a <use> element has an external xlink:href
-// (starting with http:// or https://).
-func checkUseExternal(elem xml.StartElement) (bool, Threat) {
-	for _, attr := range elem.Attr {
-		nameLower := strings.ToLower(attr.Name.Local)
-		if nameLower != "href" {
-			continue
-		}
-		valLower := strings.ToLower(strings.TrimSpace(attr.Value))
-		if strings.HasPrefix(valLower, "http://") || strings.HasPrefix(valLower, "https://") {
-			return true, Threat{
-				Type:        "external_ref",
-				Location:    "xlink:href on <use> element",
-				Description: fmt.Sprintf("External reference %q in <use> element stripped", attr.Value),
-				Severity:    "medium",
-			}
-		}
-	}
-	return false, Threat{}
 }
 
 // trimStyleFromOutput removes the last <style...> opening tag from the

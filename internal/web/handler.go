@@ -2,7 +2,9 @@ package web
 
 import (
 	"context"
+	"crypto/rand"
 	"embed"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -241,7 +243,7 @@ func (h *Handler) handleSanitize(w http.ResponseWriter, r *http.Request) {
 
 	// Store sanitized file for download if we have data
 	if len(result.SanitizedData) > 0 {
-		id := fmt.Sprintf("%d", time.Now().UnixNano())
+		id := generateSecureID()
 		h.mu.Lock()
 		h.downloads[id] = &downloadEntry{
 			data:      result.SanitizedData,
@@ -323,6 +325,13 @@ func (h *Handler) cleanupLoop() {
 // GetStats returns the current stats (for use by metrics, gRPC health, etc.)
 func (h *Handler) GetStats() StatsJSON {
 	return h.stats.Snapshot()
+}
+
+// generateSecureID returns a cryptographically random hex string for download IDs.
+func generateSecureID() string {
+	b := make([]byte, 16)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
 }
 
 func statusToString(s sanitizer.Status) string {

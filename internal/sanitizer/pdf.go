@@ -89,6 +89,69 @@ var pdfPatterns = []dangerousPattern{
 		severity:   "high",
 		desc:       "XFA form reference neutralized",
 	},
+
+	// RichMedia (Flash) — high
+	{
+		old:        []byte("/RichMedia"),
+		new:        []byte("/XXXXXXXXX"),
+		threatType: "rich_media",
+		severity:   "high",
+		desc:       "RichMedia content (Flash) neutralized",
+	},
+
+	// GoToR (remote file reference) — high
+	{
+		old:        []byte("/GoToR"),
+		new:        []byte("/XXXXX"),
+		threatType: "remote_goto",
+		severity:   "high",
+		desc:       "Remote file reference neutralized",
+	},
+
+	// GoToE (embedded file goto) — high
+	{
+		old:        []byte("/GoToE"),
+		new:        []byte("/XXXXX"),
+		threatType: "embedded_goto",
+		severity:   "high",
+		desc:       "Embedded file goto neutralized",
+	},
+
+	// Movie — medium
+	{
+		old:        []byte("/Movie"),
+		new:        []byte("/XXXXX"),
+		threatType: "movie_action",
+		severity:   "medium",
+		desc:       "Movie action neutralized",
+	},
+
+	// Sound — medium
+	{
+		old:        []byte("/Sound"),
+		new:        []byte("/XXXXX"),
+		threatType: "sound_action",
+		severity:   "medium",
+		desc:       "Sound action neutralized",
+	},
+
+	// ImportData — high
+	{
+		old:        []byte("/ImportData"),
+		new:        []byte("/XXXXXXXXXX"),
+		threatType: "import_data",
+		severity:   "high",
+		desc:       "Data import action neutralized",
+	},
+
+	// Rendition — medium
+	{
+		old:        []byte("/Rendition"),
+		new:        []byte("/XXXXXXXXX"),
+		threatType: "rendition",
+		severity:   "medium",
+		desc:       "Rendition action neutralized",
+	},
 }
 
 // PDFSanitizer strips dangerous elements from PDF documents.
@@ -108,6 +171,11 @@ func (s *PDFSanitizer) SupportedTypes() []FileType {
 
 // Sanitize processes a PDF document, neutralizing any dangerous patterns and
 // returning a result that describes what was found and changed.
+//
+// NOTE: This sanitizer uses byte-pattern replacement, not structural PDF parsing.
+// This means patterns inside strings or comments may also be neutralized, which
+// could affect content but errs on the side of security. A structural parser
+// (e.g., pdfcpu) would be more precise but adds a dependency.
 func (s *PDFSanitizer) Sanitize(ctx context.Context, data []byte, filename string) (*Result, error) {
 	// Bound the input via LimitReader so callers cannot pass unbounded data.
 	lr := io.LimitReader(bytes.NewReader(data), maxPDFSize)

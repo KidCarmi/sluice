@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/KidCarmi/Sluice/internal/sanitizer"
+	"github.com/KidCarmi/Sluice/internal/worker"
 )
 
 //go:embed static/*
@@ -83,25 +84,32 @@ type downloadEntry struct {
 	createdAt time.Time
 }
 
+const maxDownloads = 100
+
 // Handler serves the web GUI and API endpoints.
 type Handler struct {
 	dispatcher *sanitizer.Dispatcher
+	pool       *worker.Pool
 	stats      *Stats
 	logger     *slog.Logger
 	maxFileSize int64
 
 	mu        sync.Mutex
 	downloads map[string]*downloadEntry
+
+	stopCh chan struct{}
 }
 
 // NewHandler creates a new web handler.
-func NewHandler(dispatcher *sanitizer.Dispatcher, logger *slog.Logger, maxFileSize int64) *Handler {
+func NewHandler(dispatcher *sanitizer.Dispatcher, pool *worker.Pool, logger *slog.Logger, maxFileSize int64) *Handler {
 	h := &Handler{
 		dispatcher:  dispatcher,
+		pool:        pool,
 		stats:       &Stats{},
 		logger:      logger,
 		maxFileSize: maxFileSize,
 		downloads:   make(map[string]*downloadEntry),
+		stopCh:      make(chan struct{}),
 	}
 	// Clean up expired downloads every minute
 	go h.cleanupLoop()
@@ -155,7 +163,7 @@ func (h *Handler) handleSamples(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleSanitize(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
 
 	// Limit request body to max file size + multipart overhead
@@ -193,13 +201,29 @@ func (h *Handler) handleSanitize(w http.ResponseWriter, r *http.Request) {
 	filename := filepath.Base(header.Filename)
 
 	start := time.Now()
-	result, err := h.dispatcher.Dispatch(ctx, data, filename)
+	jobResult, err := h.pool.Submit(ctx, worker.Job{
+		ID:       generateSecureID(),
+		Data:     data,
+		Filename: filename,
+	})
 	duration := time.Since(start)
 
 	if err != nil {
 		h.stats.FilesProcessed.Add(1)
 		h.stats.FilesErrored.Add(1)
-		h.jsonError(w, fmt.Sprintf("sanitization failed: %v", err), http.StatusInternalServerError)
+		if ctx.Err() != nil {
+			h.jsonError(w, "sanitization timed out", http.StatusGatewayTimeout)
+		} else {
+			h.jsonError(w, fmt.Sprintf("sanitization failed: %v", err), http.StatusServiceUnavailable)
+		}
+		return
+	}
+
+	result, ok := jobResult.Result.(*sanitizer.Result)
+	if !ok || result == nil {
+		h.stats.FilesProcessed.Add(1)
+		h.stats.FilesErrored.Add(1)
+		h.jsonError(w, "sanitization produced no result", http.StatusInternalServerError)
 		return
 	}
 
@@ -249,6 +273,20 @@ func (h *Handler) handleSanitize(w http.ResponseWriter, r *http.Request) {
 			data:      result.SanitizedData,
 			filename:  "sanitized_" + filename,
 			createdAt: time.Now(),
+		}
+		// Evict oldest if over cap
+		if len(h.downloads) > maxDownloads {
+			var oldestID string
+			var oldestTime time.Time
+			for did, de := range h.downloads {
+				if oldestID == "" || de.createdAt.Before(oldestTime) {
+					oldestID = did
+					oldestTime = de.createdAt
+				}
+			}
+			if oldestID != "" {
+				delete(h.downloads, oldestID)
+			}
 		}
 		h.mu.Unlock()
 		resp.DownloadID = id
@@ -311,15 +349,25 @@ func (h *Handler) jsonError(w http.ResponseWriter, message string, status int) {
 func (h *Handler) cleanupLoop() {
 	ticker := time.NewTicker(1 * time.Minute)
 	defer ticker.Stop()
-	for range ticker.C {
-		h.mu.Lock()
-		for id, entry := range h.downloads {
-			if time.Since(entry.createdAt) > 10*time.Minute {
-				delete(h.downloads, id)
+	for {
+		select {
+		case <-ticker.C:
+			h.mu.Lock()
+			for id, entry := range h.downloads {
+				if time.Since(entry.createdAt) > 10*time.Minute {
+					delete(h.downloads, id)
+				}
 			}
+			h.mu.Unlock()
+		case <-h.stopCh:
+			return
 		}
-		h.mu.Unlock()
 	}
+}
+
+// Stop signals the handler to stop its background cleanup goroutine.
+func (h *Handler) Stop() {
+	close(h.stopCh)
 }
 
 // GetStats returns the current stats (for use by metrics, gRPC health, etc.)

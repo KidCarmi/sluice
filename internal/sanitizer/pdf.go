@@ -211,33 +211,36 @@ func (s *PDFSanitizer) Sanitize(ctx context.Context, data []byte, filename strin
 	working := make([]byte, len(bounded))
 	copy(working, bounded)
 
+	// Single pass: scan once, replace all patterns in-place.
+	// All replacements are same-length, so we can modify working directly.
 	var threats []Threat
-
-	// Process each dangerous pattern.
-	for _, pat := range pdfPatterns {
-		// Check for cancellation between pattern scans.
-		select {
-		case <-ctx.Done():
-			return nil, fmt.Errorf("pdf: %w", ctx.Err())
-		default:
+	for i := 0; i < len(working); i++ {
+		// Check for cancellation every 1MB
+		if i%(1024*1024) == 0 && i > 0 {
+			select {
+			case <-ctx.Done():
+				return nil, fmt.Errorf("pdf: %w", ctx.Err())
+			default:
+			}
 		}
 
-		count := bytes.Count(working, pat.old)
-		if count > 0 {
-			working = bytes.ReplaceAll(working, pat.old, pat.new)
-			for i := 0; i < count; i++ {
+		for _, pat := range pdfPatterns {
+			if i+len(pat.old) <= len(working) && bytes.Equal(working[i:i+len(pat.old)], pat.old) {
+				copy(working[i:i+len(pat.old)], pat.new)
 				threats = append(threats, Threat{
 					Type:        pat.threatType,
-					Location:    fmt.Sprintf("byte pattern %q", string(pat.old)),
+					Location:    fmt.Sprintf("byte pattern %q at offset %d", string(pat.old), i),
 					Description: pat.desc,
 					Severity:    pat.severity,
 				})
+				s.logger.InfoContext(ctx, "neutralized PDF threat",
+					slog.String("filename", filename),
+					slog.String("threat", pat.threatType),
+					slog.Int("offset", i),
+				)
+				i += len(pat.old) - 1 // skip past the replacement
+				break                  // only one pattern can match at this position
 			}
-			s.logger.InfoContext(ctx, "neutralized PDF threat",
-				slog.String("filename", filename),
-				slog.String("threat", pat.threatType),
-				slog.Int("count", count),
-			)
 		}
 	}
 

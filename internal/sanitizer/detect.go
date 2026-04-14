@@ -19,6 +19,8 @@ const (
 	FileTypeJPEG    FileType = "jpeg"
 	FileTypePNG     FileType = "png"
 	FileTypeGIF     FileType = "gif"
+	FileTypeSVG     FileType = "svg"
+	FileTypeZIP     FileType = "zip"
 	FileTypeUnknown FileType = "unknown"
 )
 
@@ -70,6 +72,9 @@ func detectByMagic(data []byte) FileType {
 	if bytes.HasPrefix(data, magicGIF87a) || bytes.HasPrefix(data, magicGIF89a) {
 		return FileTypeGIF
 	}
+	if detectSVG(data) {
+		return FileTypeSVG
+	}
 	return FileTypeUnknown
 }
 
@@ -109,7 +114,21 @@ func detectOOXML(data []byte) FileType {
 		}
 	}
 
-	return FileTypeUnknown
+	// Valid ZIP but not OOXML — treat as plain archive.
+	return FileTypeZIP
+}
+
+// detectSVG checks whether data looks like an SVG file. SVGs are XML and may
+// start with an XML declaration (<?xml) or directly with <svg. We check the
+// first 512 bytes for the <svg tag to avoid false positives on other XML.
+func detectSVG(data []byte) bool {
+	// Check a reasonable prefix — SVGs often have XML declarations first.
+	limit := 512
+	if len(data) < limit {
+		limit = len(data)
+	}
+	prefix := bytes.ToLower(data[:limit])
+	return bytes.Contains(prefix, []byte("<svg"))
 }
 
 // detectByExtension maps common file extensions to their FileType. This is
@@ -131,6 +150,10 @@ func detectByExtension(filename string) FileType {
 		return FileTypePNG
 	case "gif":
 		return FileTypeGIF
+	case "svg":
+		return FileTypeSVG
+	case "zip":
+		return FileTypeZIP
 	default:
 		return FileTypeUnknown
 	}
@@ -141,7 +164,8 @@ func detectByExtension(filename string) FileType {
 func IsSupportedType(ft FileType) bool {
 	switch ft {
 	case FileTypePDF, FileTypeDOCX, FileTypeXLSX, FileTypePPTX,
-		FileTypeJPEG, FileTypePNG, FileTypeGIF:
+		FileTypeJPEG, FileTypePNG, FileTypeGIF,
+		FileTypeSVG, FileTypeZIP:
 		return true
 	default:
 		return false

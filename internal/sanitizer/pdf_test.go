@@ -200,6 +200,133 @@ func TestPDFSanitizer_MultipleThreats(t *testing.T) {
 	}
 }
 
+func TestPDFSanitizer_StripRichMedia(t *testing.T) {
+	s := newTestSanitizer()
+	data := makeTestPDF("/RichMedia (flashcontent)")
+	res, err := s.Sanitize(context.Background(), data, "richmedia.pdf")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Status != StatusSanitized {
+		t.Errorf("expected StatusSanitized, got %d", res.Status)
+	}
+	if strings.Contains(string(res.SanitizedData), "/RichMedia") {
+		t.Error("sanitized data still contains /RichMedia")
+	}
+	found := false
+	for _, th := range res.Threats {
+		if th.Type == "rich_media" {
+			found = true
+			if th.Severity != "high" {
+				t.Errorf("expected severity high, got %s", th.Severity)
+			}
+		}
+	}
+	if !found {
+		t.Error("expected a rich_media threat to be recorded")
+	}
+}
+
+func TestPDFSanitizer_StripGoToR(t *testing.T) {
+	s := newTestSanitizer()
+	data := makeTestPDF("/S /GoToR /F (evil.pdf)")
+	res, err := s.Sanitize(context.Background(), data, "gotor.pdf")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Status != StatusSanitized {
+		t.Errorf("expected StatusSanitized, got %d", res.Status)
+	}
+	if strings.Contains(string(res.SanitizedData), "/GoToR") {
+		t.Error("sanitized data still contains /GoToR")
+	}
+	found := false
+	for _, th := range res.Threats {
+		if th.Type == "remote_goto" {
+			found = true
+			if th.Severity != "high" {
+				t.Errorf("expected severity high, got %s", th.Severity)
+			}
+		}
+	}
+	if !found {
+		t.Error("expected a remote_goto threat to be recorded")
+	}
+}
+
+func TestPDFSanitizer_StripGoToE(t *testing.T) {
+	s := newTestSanitizer()
+	data := makeTestPDF("/S /GoToE /D (embedded.pdf)")
+	res, err := s.Sanitize(context.Background(), data, "gotoe.pdf")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Status != StatusSanitized {
+		t.Errorf("expected StatusSanitized, got %d", res.Status)
+	}
+	if strings.Contains(string(res.SanitizedData), "/GoToE") {
+		t.Error("sanitized data still contains /GoToE")
+	}
+}
+
+func TestPDFSanitizer_StripMovieAndSound(t *testing.T) {
+	s := newTestSanitizer()
+	data := makeTestPDF("/Movie /Sound")
+	res, err := s.Sanitize(context.Background(), data, "media.pdf")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Status != StatusSanitized {
+		t.Errorf("expected StatusSanitized, got %d", res.Status)
+	}
+	if strings.Contains(string(res.SanitizedData), "/Movie") {
+		t.Error("sanitized data still contains /Movie")
+	}
+	if strings.Contains(string(res.SanitizedData), "/Sound") {
+		t.Error("sanitized data still contains /Sound")
+	}
+	types := make(map[string]bool)
+	for _, th := range res.Threats {
+		types[th.Type] = true
+	}
+	if !types["movie_action"] {
+		t.Error("expected movie_action threat to be recorded")
+	}
+	if !types["sound_action"] {
+		t.Error("expected sound_action threat to be recorded")
+	}
+}
+
+func TestPDFSanitizer_StripImportData(t *testing.T) {
+	s := newTestSanitizer()
+	data := makeTestPDF("/S /ImportData")
+	res, err := s.Sanitize(context.Background(), data, "import.pdf")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Status != StatusSanitized {
+		t.Errorf("expected StatusSanitized, got %d", res.Status)
+	}
+	if strings.Contains(string(res.SanitizedData), "/ImportData") {
+		t.Error("sanitized data still contains /ImportData")
+	}
+}
+
+func TestPDFSanitizer_StripRendition(t *testing.T) {
+	s := newTestSanitizer()
+	data := makeTestPDF("/S /Rendition")
+	res, err := s.Sanitize(context.Background(), data, "rendition.pdf")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Status != StatusSanitized {
+		t.Errorf("expected StatusSanitized, got %d", res.Status)
+	}
+	if strings.Contains(string(res.SanitizedData), "/Rendition") {
+		t.Error("sanitized data still contains /Rendition")
+	}
+}
+
 func TestPDFSanitizer_InvalidPDF(t *testing.T) {
 	s := newTestSanitizer()
 	data := []byte("this is not a PDF at all")

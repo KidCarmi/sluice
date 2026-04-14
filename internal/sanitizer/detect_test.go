@@ -95,11 +95,11 @@ func TestDetectType_ExtensionFallback(t *testing.T) {
 
 func TestDetectType_ZIPWithoutOOXML(t *testing.T) {
 	// A valid ZIP that does not contain any OOXML marker directories should
-	// fall back to extension-based detection.
+	// be detected as a plain ZIP archive.
 	data := buildMinimalZIP(t, "README.txt")
 	ft := DetectType(data, "archive.zip")
-	if ft != FileTypeUnknown {
-		t.Errorf("expected %q for plain ZIP, got %q", FileTypeUnknown, ft)
+	if ft != FileTypeZIP {
+		t.Errorf("expected %q for plain ZIP, got %q", FileTypeZIP, ft)
 	}
 }
 

@@ -57,6 +57,8 @@ func main() {
 	dispatcher.Register(sanitizer.NewOfficeSanitizer(logger))
 	dispatcher.Register(sanitizer.NewPDFSanitizer(logger))
 	dispatcher.Register(sanitizer.NewImageSanitizer(logger))
+	dispatcher.Register(sanitizer.NewSVGSanitizer(logger))
+	dispatcher.Register(sanitizer.NewArchiveSanitizer(dispatcher, logger))
 
 	// Create web handler
 	webHandler := web.NewHandler(dispatcher, logger, cfg.Limits.MaxFileSize)

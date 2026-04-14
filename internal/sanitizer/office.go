@@ -15,6 +15,10 @@ import (
 // (50 MB). This prevents zip-bomb attacks.
 const maxEntrySize = 50 * 1024 * 1024
 
+// maxDecompressedTotal is the maximum cumulative decompressed size across all
+// ZIP entries (100 MB). This catches zip bombs that use many small entries.
+const maxDecompressedTotal = 100 * 1024 * 1024
+
 // OfficeSanitizer strips dangerous content from Office Open XML files (docx,
 // xlsx, pptx). These formats are ZIP archives containing XML parts; the
 // sanitizer walks every entry, drops known-dangerous ones, and rebuilds a
@@ -62,9 +66,10 @@ func (s *OfficeSanitizer) Sanitize(ctx context.Context, data []byte, filename st
 	}
 
 	var (
-		buf     bytes.Buffer
-		zw      = zip.NewWriter(&buf)
-		threats []Threat
+		buf                bytes.Buffer
+		zw                 = zip.NewWriter(&buf)
+		threats            []Threat
+		totalDecompressed  int64
 	)
 
 	for _, entry := range zr.File {
@@ -114,6 +119,19 @@ func (s *OfficeSanitizer) Sanitize(ctx context.Context, data []byte, filename st
 			result.Status = StatusError
 			result.Error = fmt.Errorf("office sanitize: reading entry %q: %w", filepath.Base(name), err)
 			return result, result.Error
+		}
+
+		// Track cumulative decompressed size to detect zip bombs.
+		totalDecompressed += int64(len(content))
+		if totalDecompressed > maxDecompressedTotal {
+			result.Status = StatusBlocked
+			result.Threats = append(threats, Threat{
+				Type:        "zip_bomb",
+				Location:    name,
+				Description: fmt.Sprintf("cumulative decompressed size exceeds %d bytes", maxDecompressedTotal),
+				Severity:    "critical",
+			})
+			return result, fmt.Errorf("office sanitize: cumulative decompressed size exceeds limit")
 		}
 
 		// Check .rels files for external references.
@@ -192,6 +210,36 @@ func classifyEntry(fullPath, baseName string) (Threat, bool) {
 		}, true
 	}
 
+	// Visual Basic Script files.
+	if strings.HasSuffix(strings.ToLower(fullPath), ".vbs") {
+		return Threat{
+			Type:        "vbscript",
+			Location:    fullPath,
+			Description: fmt.Sprintf("Visual Basic Script file (%s)", baseName),
+			Severity:    "critical",
+		}, true
+	}
+
+	// Encoded VBScript files.
+	if strings.HasSuffix(strings.ToLower(fullPath), ".vbe") {
+		return Threat{
+			Type:        "vbscript",
+			Location:    fullPath,
+			Description: fmt.Sprintf("Encoded VBScript file (%s)", baseName),
+			Severity:    "critical",
+		}, true
+	}
+
+	// Windows Script Files.
+	if strings.HasSuffix(strings.ToLower(fullPath), ".wsf") {
+		return Threat{
+			Type:        "script",
+			Location:    fullPath,
+			Description: fmt.Sprintf("Windows Script File (%s)", baseName),
+			Severity:    "critical",
+		}, true
+	}
+
 	// OLE embedded objects: oleObject*.bin
 	if strings.HasPrefix(lower, "oleobject") && strings.HasSuffix(lower, ".bin") {
 		return Threat{
@@ -250,15 +298,15 @@ func readZIPEntry(f *zip.File) ([]byte, error) {
 // with TargetMode="External" pointing to remote URLs (http://, https://,
 // ftp://). Internal relative references are left alone.
 func containsExternalRef(data []byte) bool {
-	s := string(data)
+	s := strings.ToLower(string(data))
 
-	// Only flag entries that are explicitly marked as external.
-	if !strings.Contains(s, `TargetMode="External"`) {
+	// Only flag entries that are explicitly marked as external (case-insensitive).
+	if !strings.Contains(s, `targetmode="external"`) {
 		return false
 	}
 
-	// Look for URL targets.
-	for _, prefix := range []string{`Target="http://`, `Target="https://`, `Target="ftp://`} {
+	// Look for URL targets (case-insensitive).
+	for _, prefix := range []string{`target="http://`, `target="https://`, `target="ftp://`} {
 		if strings.Contains(s, prefix) {
 			return true
 		}

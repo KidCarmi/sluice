@@ -72,18 +72,17 @@ func (s *SVGSanitizer) Sanitize(ctx context.Context, data []byte, filename strin
 		return result, nil
 	}
 
-	// Bound the input via LimitReader.
-	lr := io.LimitReader(bytes.NewReader(data), maxSVGSize)
-	bounded, err := io.ReadAll(lr)
-	if err != nil {
+	// data is already bounded by MaxBytesReader in the HTTP handler.
+	// This check is defense-in-depth only.
+	if int64(len(data)) > maxSVGSize {
 		result.Status = StatusError
-		result.Error = fmt.Errorf("svg: reading input: %w", err)
+		result.Error = fmt.Errorf("svg: file exceeds maximum size (%d bytes)", len(data))
 		return result, nil
 	}
 
 	// Validate that the input is plausible XML/SVG by checking for an
 	// opening angle bracket somewhere in the first 512 bytes.
-	if !looksLikeSVG(bounded) {
+	if !looksLikeSVG(data) {
 		result.Status = StatusError
 		result.Error = fmt.Errorf("svg: input does not appear to be SVG/XML")
 		return result, nil
@@ -91,7 +90,7 @@ func (s *SVGSanitizer) Sanitize(ctx context.Context, data []byte, filename strin
 
 	var threats []Threat
 	var out bytes.Buffer
-	decoder := xml.NewDecoder(bytes.NewReader(bounded))
+	decoder := xml.NewDecoder(bytes.NewReader(data))
 	decoder.Entity = map[string]string{} // disable external entity resolution (XXE)
 	decoder.Strict = false
 	decoder.AutoClose = xml.HTMLAutoClose

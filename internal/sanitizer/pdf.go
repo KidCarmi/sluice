@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io"
 	"log/slog"
 )
 
@@ -177,15 +176,14 @@ func (s *PDFSanitizer) SupportedTypes() []FileType {
 // could affect content but errs on the side of security. A structural parser
 // (e.g., pdfcpu) would be more precise but adds a dependency.
 func (s *PDFSanitizer) Sanitize(ctx context.Context, data []byte, filename string) (*Result, error) {
-	// Bound the input via LimitReader so callers cannot pass unbounded data.
-	lr := io.LimitReader(bytes.NewReader(data), maxPDFSize)
-	bounded, err := io.ReadAll(lr)
-	if err != nil {
+	// data is already bounded by MaxBytesReader in the HTTP handler.
+	// This check is defense-in-depth only.
+	if int64(len(data)) > maxPDFSize {
 		return &Result{
 			Status:       StatusError,
 			OriginalType: FileTypePDF,
 			OriginalSize: int64(len(data)),
-			Error:        fmt.Errorf("pdf: reading input: %w", err),
+			Error:        fmt.Errorf("pdf: file exceeds maximum size (%d bytes)", len(data)),
 		}, nil
 	}
 
@@ -196,7 +194,7 @@ func (s *PDFSanitizer) Sanitize(ctx context.Context, data []byte, filename strin
 	default:
 	}
 
-	if len(bounded) == 0 {
+	if len(data) == 0 {
 		return &Result{
 			Status:       StatusError,
 			OriginalType: FileTypePDF,
@@ -206,19 +204,21 @@ func (s *PDFSanitizer) Sanitize(ctx context.Context, data []byte, filename strin
 	}
 
 	// Validate magic bytes.
-	if len(bounded) < len(pdfMagic) || !bytes.HasPrefix(bounded, pdfMagic) {
+	if len(data) < len(pdfMagic) || !bytes.HasPrefix(data, pdfMagic) {
 		s.logger.WarnContext(ctx, "invalid PDF: missing magic bytes", slog.String("filename", filename))
 		return &Result{
 			Status:       StatusError,
 			OriginalType: FileTypePDF,
-			OriginalSize: int64(len(bounded)),
+			OriginalSize: int64(len(data)),
 			Error:        fmt.Errorf("pdf: invalid file, missing %%PDF header"),
 		}, nil
 	}
 
-	originalSize := int64(len(bounded))
-	working := make([]byte, len(bounded))
-	copy(working, bounded)
+	originalSize := int64(len(data))
+
+	// Clone data once for in-place mutation. On the clean path (no threats),
+	// we return the original data without allocating a copy.
+	working := bytes.Clone(data)
 
 	// Single pass: scan once, replace all patterns in-place.
 	// All replacements are same-length, so we can modify working directly.
@@ -278,7 +278,7 @@ func (s *PDFSanitizer) Sanitize(ctx context.Context, data []byte, filename strin
 			OriginalSize:  originalSize,
 			SanitizedSize: originalSize,
 			Threats:       nil,
-			SanitizedData: bounded,
+			SanitizedData: data,
 		}, nil
 	}
 

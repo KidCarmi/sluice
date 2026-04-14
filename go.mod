@@ -1,6 +1,6 @@
 module github.com/KidCarmi/Sluice
 
-go 1.25.9
+go 1.25
 
 require (
 	google.golang.org/grpc v1.80.0

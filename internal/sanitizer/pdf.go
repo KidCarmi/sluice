@@ -196,6 +196,15 @@ func (s *PDFSanitizer) Sanitize(ctx context.Context, data []byte, filename strin
 	default:
 	}
 
+	if len(bounded) == 0 {
+		return &Result{
+			Status:       StatusError,
+			OriginalType: FileTypePDF,
+			OriginalSize: 0,
+			Error:        fmt.Errorf("pdf: empty file"),
+		}, nil
+	}
+
 	// Validate magic bytes.
 	if len(bounded) < len(pdfMagic) || !bytes.HasPrefix(bounded, pdfMagic) {
 		s.logger.WarnContext(ctx, "invalid PDF: missing magic bytes", slog.String("filename", filename))

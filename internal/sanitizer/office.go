@@ -95,6 +95,16 @@ func (s *OfficeSanitizer) Sanitize(ctx context.Context, data []byte, filename st
 			continue
 		}
 
+		if len(name) > 4096 {
+			threats = append(threats, Threat{
+				Type:        "oversized_path",
+				Location:    "entry name",
+				Description: fmt.Sprintf("ZIP entry name exceeds maximum length (%d chars)", len(name)),
+				Severity:    "medium",
+			})
+			continue
+		}
+
 		baseName := filepath.Base(name)
 
 		// Check for dangerous entry types.

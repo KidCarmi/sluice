@@ -65,6 +65,15 @@ func (s *ImageSanitizer) Sanitize(ctx context.Context, data []byte, filename str
 		return result, nil
 	}
 
+	bounds := img.Bounds()
+	pixelCount := int64(bounds.Dx()) * int64(bounds.Dy())
+	const maxPixels = 100_000_000 // 100 megapixels
+	if pixelCount > maxPixels {
+		result.Status = StatusError
+		result.Error = fmt.Errorf("decoded image exceeds pixel limit (%d pixels, max %d)", pixelCount, maxPixels)
+		return result, nil
+	}
+
 	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("image sanitize: %w", err)
 	}

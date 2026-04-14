@@ -81,8 +81,6 @@ func main() {
 	}, func(ctx context.Context, job worker.Job) (interface{}, error) {
 		return dispatcher.Dispatch(ctx, job.Data, job.Filename)
 	})
-	defer pool.Stop()
-
 	// Create web handler
 	webHandler := web.NewHandler(dispatcher, pool, logger, cfg.Limits.MaxFileSize)
 
@@ -117,6 +115,7 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	webHandler.Stop()
+	pool.Stop() // drain in-flight jobs before closing HTTP
 	if err := httpServer.Shutdown(ctx); err != nil {
 		logger.Error("http shutdown error", "error", err)
 	}

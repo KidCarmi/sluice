@@ -85,6 +85,7 @@ type downloadEntry struct {
 }
 
 const maxDownloads = 100
+const maxTotalDownloadBytes = 500 * 1024 * 1024 // 500MB
 
 // requestIDKey is the context key for request ID propagation.
 type requestIDKey struct{}
@@ -97,8 +98,9 @@ type Handler struct {
 	logger     *slog.Logger
 	maxFileSize int64
 
-	mu        sync.Mutex
-	downloads map[string]*downloadEntry
+	mu                 sync.Mutex
+	downloads          map[string]*downloadEntry
+	totalDownloadBytes int64
 
 	// lastError tracks the most recent sanitization error for health checks.
 	lastError     atomic.Value // stores string
@@ -294,7 +296,8 @@ func (h *Handler) handleSanitize(w http.ResponseWriter, r *http.Request) {
 			filename:  "sanitized_" + filename,
 			createdAt: time.Now(),
 		}
-		// Evict oldest if over cap
+		h.totalDownloadBytes += int64(len(result.SanitizedData))
+		// Evict oldest if over count cap
 		if len(h.downloads) > maxDownloads {
 			var oldestID string
 			var oldestTime time.Time
@@ -305,6 +308,22 @@ func (h *Handler) handleSanitize(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			if oldestID != "" {
+				h.totalDownloadBytes -= int64(len(h.downloads[oldestID].data))
+				delete(h.downloads, oldestID)
+			}
+		}
+		// Evict oldest entries until under total size cap
+		for h.totalDownloadBytes > maxTotalDownloadBytes && len(h.downloads) > 0 {
+			var oldestID string
+			var oldestTime time.Time
+			for did, de := range h.downloads {
+				if oldestID == "" || de.createdAt.Before(oldestTime) {
+					oldestID = did
+					oldestTime = de.createdAt
+				}
+			}
+			if oldestID != "" {
+				h.totalDownloadBytes -= int64(len(h.downloads[oldestID].data))
 				delete(h.downloads, oldestID)
 			}
 		}
@@ -418,6 +437,11 @@ func (h *Handler) jsonError(w http.ResponseWriter, message string, status int) {
 }
 
 func (h *Handler) cleanupLoop() {
+	defer func() {
+		if r := recover(); r != nil {
+			h.logger.Error("cleanup loop panic recovered", "panic", fmt.Sprintf("%v", r))
+		}
+	}()
 	ticker := time.NewTicker(1 * time.Minute)
 	defer ticker.Stop()
 	for {
@@ -426,6 +450,7 @@ func (h *Handler) cleanupLoop() {
 			h.mu.Lock()
 			for id, entry := range h.downloads {
 				if time.Since(entry.createdAt) > 10*time.Minute {
+					h.totalDownloadBytes -= int64(len(entry.data))
 					delete(h.downloads, id)
 				}
 			}
@@ -437,8 +462,14 @@ func (h *Handler) cleanupLoop() {
 }
 
 // Stop signals the handler to stop its background cleanup goroutine.
+// It is safe to call multiple times.
 func (h *Handler) Stop() {
-	close(h.stopCh)
+	select {
+	case <-h.stopCh:
+		return // already stopped
+	default:
+		close(h.stopCh)
+	}
 }
 
 // GetStats returns the current stats (for use by metrics, gRPC health, etc.)

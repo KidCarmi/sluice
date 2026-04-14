@@ -94,7 +94,7 @@ Additional guarantees:
 
 Before running Sluice in production:
 
-- [ ] Use `deploy/docker-compose.prod.yml` (not `docker-compose.yml`).
+- [ ] Use `deploy/docker-compose.yml` (prod default) — NOT `docker-compose.dev.yml`.
 - [ ] Confirm `testing_ui.enabled: false` (prod compose also omits the
       HTTP port binding).
 - [ ] Publish gRPC port on `127.0.0.1:8443` only; let Culvert reach it via

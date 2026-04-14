@@ -149,7 +149,7 @@ func (h *Handler) handleSamples(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", name))
-	_, _ = w.Write(data)
+	_, _ = w.Write(data) // #nosec G705 -- data is from read-only embedded FS, not user input
 }
 
 func (h *Handler) handleSanitize(w http.ResponseWriter, r *http.Request) {

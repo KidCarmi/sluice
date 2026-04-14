@@ -233,19 +233,26 @@ fi
 ###############################################################################
 step "Configuring Docker"
 
-sudo systemctl daemon-reload >/dev/null 2>&1 || true
-sudo systemctl enable containerd >/dev/null 2>&1 || true
-sudo systemctl start containerd 2>/dev/null || true
-sudo systemctl enable docker >/dev/null 2>&1 || true
+# Check if Docker is already running (e.g. rootless, Docker Desktop, DinD).
+# Only try systemd management if Docker is NOT already responsive.
+if sudo docker info &>/dev/null 2>&1 || docker info &>/dev/null 2>&1; then
+  info "Docker engine is already running"
+else
+  info "Starting Docker via systemd..."
+  sudo systemctl daemon-reload >/dev/null 2>&1 || true
+  sudo systemctl enable containerd >/dev/null 2>&1 || true
+  sudo systemctl start containerd 2>/dev/null || true
+  sudo systemctl enable docker >/dev/null 2>&1 || true
 
-if ! sudo systemctl start docker 2>/dev/null; then
-  warn "Docker failed to start. Attempting recovery..."
-  sudo systemctl daemon-reload || true
-  sudo systemctl restart containerd 2>/dev/null || true
-  sleep 2
   if ! sudo systemctl start docker 2>/dev/null; then
-    dump_docker_diagnostics
-    error "Docker daemon could not be started. See diagnostics above."
+    warn "Docker failed to start. Attempting recovery..."
+    sudo systemctl daemon-reload || true
+    sudo systemctl restart containerd 2>/dev/null || true
+    sleep 2
+    if ! sudo systemctl start docker 2>/dev/null; then
+      dump_docker_diagnostics
+      error "Docker daemon could not be started. See diagnostics above."
+    fi
   fi
 fi
 
@@ -258,7 +265,7 @@ if [[ "$CURRENT_USER" != "root" ]]; then
   fi
 fi
 
-if sudo docker info &>/dev/null; then
+if sudo docker info &>/dev/null 2>&1 || docker info &>/dev/null 2>&1; then
   info "Docker engine is running"
 else
   dump_docker_diagnostics

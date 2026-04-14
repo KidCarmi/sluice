@@ -6,9 +6,9 @@ services:
     container_name: sluice
     restart: unless-stopped
     ports:
-      - "127.0.0.1:8080:8080"   # Web GUI
-      - "127.0.0.1:8443:8443"   # gRPC
-      - "127.0.0.1:9090:9090"   # Prometheus metrics
+      - "8080:8080"   # Web GUI
+      - "8443:8443"   # gRPC
+      - "9090:9090"   # Prometheus metrics
     volumes:
       - sluice-data:/data
     environment:

@@ -12,6 +12,7 @@ import (
 	"math/big"
 	"net"
 	"os"
+	"path/filepath"
 	"time"
 )
 
@@ -169,7 +170,7 @@ func LoadTLSConfig(certFile, keyFile, caFile string) (*tls.Config, error) {
 		return nil, fmt.Errorf("loading server key pair: %w", err)
 	}
 
-	caPEM, err := os.ReadFile(caFile)
+	caPEM, err := os.ReadFile(filepath.Clean(caFile)) // #nosec G304 -- path is from server config, not user input
 	if err != nil {
 		return nil, fmt.Errorf("reading CA file: %w", err)
 	}

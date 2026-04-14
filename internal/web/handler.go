@@ -124,7 +124,7 @@ func (h *Handler) handleSanitize(w http.ResponseWriter, r *http.Request) {
 	// Limit request body to max file size + multipart overhead
 	r.Body = http.MaxBytesReader(w, r.Body, h.maxFileSize+4096)
 
-	err := r.ParseMultipartForm(h.maxFileSize)
+	err := r.ParseMultipartForm(h.maxFileSize) // #nosec G120 -- body is already bounded by MaxBytesReader above
 	if err != nil {
 		h.jsonError(w, "file too large or invalid form data", http.StatusBadRequest)
 		return

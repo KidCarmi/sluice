@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -143,7 +144,8 @@ func Default() *Config {
 
 // Load reads a YAML config file from path and returns a parsed Config.
 func Load(path string) (*Config, error) {
-	f, err := os.Open(path)
+	path = filepath.Clean(path)
+	f, err := os.Open(path) // #nosec G304 -- path is from CLI flag or constant, not user input
 	if err != nil {
 		return nil, fmt.Errorf("open config: %w", err)
 	}

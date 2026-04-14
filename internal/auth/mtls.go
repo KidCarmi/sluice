@@ -4,9 +4,11 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/hex"
 	"encoding/pem"
 	"fmt"
 	"math/big"
@@ -15,6 +17,12 @@ import (
 	"path/filepath"
 	"time"
 )
+
+// sha256FingerprintDER returns the hex-encoded SHA-256 of a DER certificate.
+func sha256FingerprintDER(der []byte) string {
+	sum := sha256.Sum256(der)
+	return hex.EncodeToString(sum[:])
+}
 
 // GenerateCA creates a new self-signed CA certificate and private key.
 // Returns PEM-encoded cert and key.
@@ -164,7 +172,20 @@ func GenerateServerCert(caCertPEM, caKeyPEM []byte, hosts []string) (certPEM, ke
 }
 
 // LoadTLSConfig creates a tls.Config for a gRPC server requiring mTLS.
+// All clients MUST present a valid client cert (RequireAndVerifyClientCert).
 func LoadTLSConfig(certFile, keyFile, caFile string) (*tls.Config, error) {
+	return loadTLSConfig(certFile, keyFile, caFile, tls.RequireAndVerifyClientCert)
+}
+
+// LoadTLSConfigOptionalClient returns a tls.Config that verifies client certs
+// when presented but does not require them. Used for gRPC servers that must
+// accept both authenticated (Sanitize, Health) and unauthenticated (Enroll)
+// RPCs on the same port — the per-RPC interceptor enforces auth.
+func LoadTLSConfigOptionalClient(certFile, keyFile, caFile string) (*tls.Config, error) {
+	return loadTLSConfig(certFile, keyFile, caFile, tls.VerifyClientCertIfGiven)
+}
+
+func loadTLSConfig(certFile, keyFile, caFile string, clientAuth tls.ClientAuthType) (*tls.Config, error) {
 	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
 	if err != nil {
 		return nil, fmt.Errorf("loading server key pair: %w", err)
@@ -183,9 +204,117 @@ func LoadTLSConfig(certFile, keyFile, caFile string) (*tls.Config, error) {
 	return &tls.Config{
 		Certificates: []tls.Certificate{cert},
 		ClientCAs:    pool,
-		ClientAuth:   tls.RequireAndVerifyClientCert,
+		ClientAuth:   clientAuth,
 		MinVersion:   tls.VersionTLS13,
 	}, nil
+}
+
+// BootstrapServerCerts ensures a CA and server certificate exist at the given
+// paths. If any file is missing, it generates a new CA (or reuses an existing
+// one), issues a fresh server cert for the provided hosts, and writes all
+// three files with mode 0600. Idempotent: if everything already exists, it
+// returns (caCert, serverCert) unchanged.
+//
+// Returns the PEM-encoded CA cert and the PEM-encoded server cert for any
+// caller that needs to log fingerprints or derive the enrollment manager.
+func BootstrapServerCerts(certFile, keyFile, caFile string, hosts []string) (caCertPEM, serverCertPEM []byte, err error) {
+	certFile = filepath.Clean(certFile)
+	keyFile = filepath.Clean(keyFile)
+	caFile = filepath.Clean(caFile)
+
+	// Ensure parent directories exist.
+	for _, p := range []string{certFile, keyFile, caFile} {
+		if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+			return nil, nil, fmt.Errorf("creating cert directory %s: %w", filepath.Dir(p), err)
+		}
+	}
+
+	// If all three files exist already, load and return.
+	if fileExists(certFile) && fileExists(keyFile) && fileExists(caFile) {
+		caCertPEM, err = os.ReadFile(caFile) // #nosec G304 -- admin-provided path
+		if err != nil {
+			return nil, nil, fmt.Errorf("reading existing CA: %w", err)
+		}
+		serverCertPEM, err = os.ReadFile(certFile) // #nosec G304
+		if err != nil {
+			return nil, nil, fmt.Errorf("reading existing server cert: %w", err)
+		}
+		return caCertPEM, serverCertPEM, nil
+	}
+
+	// Re-use CA if present, else mint a new one.
+	var caKeyPEM []byte
+	if fileExists(caFile) {
+		caCertPEM, err = os.ReadFile(caFile) // #nosec G304
+		if err != nil {
+			return nil, nil, fmt.Errorf("reading CA cert: %w", err)
+		}
+		caKeyPath := caKeyPath(caFile)
+		caKeyPEM, err = os.ReadFile(caKeyPath) // #nosec G304
+		if err != nil {
+			return nil, nil, fmt.Errorf("reading CA key %s: %w", caKeyPath, err)
+		}
+	} else {
+		caCertPEM, caKeyPEM, err = GenerateCA()
+		if err != nil {
+			return nil, nil, fmt.Errorf("generating CA: %w", err)
+		}
+		if err := os.WriteFile(caFile, caCertPEM, 0o600); err != nil {
+			return nil, nil, fmt.Errorf("writing CA cert: %w", err)
+		}
+		if err := os.WriteFile(caKeyPath(caFile), caKeyPEM, 0o600); err != nil {
+			return nil, nil, fmt.Errorf("writing CA key: %w", err)
+		}
+	}
+
+	// Generate server cert.
+	serverCertPEM, serverKeyPEM, err := GenerateServerCert(caCertPEM, caKeyPEM, hosts)
+	if err != nil {
+		return nil, nil, fmt.Errorf("generating server cert: %w", err)
+	}
+	if err := os.WriteFile(certFile, serverCertPEM, 0o600); err != nil {
+		return nil, nil, fmt.Errorf("writing server cert: %w", err)
+	}
+	if err := os.WriteFile(keyFile, serverKeyPEM, 0o600); err != nil {
+		return nil, nil, fmt.Errorf("writing server key: %w", err)
+	}
+
+	return caCertPEM, serverCertPEM, nil
+}
+
+// LoadCAKey reads the CA private key sibling of the CA cert file.
+func LoadCAKey(caFile string) ([]byte, error) {
+	return os.ReadFile(caKeyPath(filepath.Clean(caFile))) // #nosec G304 -- admin-provided path
+}
+
+func caKeyPath(caFile string) string {
+	dir := filepath.Dir(caFile)
+	base := filepath.Base(caFile)
+	// Strip common cert extensions and append -key.pem.
+	for _, ext := range []string{".pem", ".crt", ".cert"} {
+		if len(base) > len(ext) && base[len(base)-len(ext):] == ext {
+			base = base[:len(base)-len(ext)]
+			break
+		}
+	}
+	return filepath.Join(dir, base+"-key.pem")
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+// CertFingerprintSHA256 returns the SHA-256 fingerprint of a PEM-encoded
+// certificate as a lowercase hex string prefixed with "sha256:". This is what
+// the operator pastes into Culvert's admin UI for TOFU verification.
+func CertFingerprintSHA256(certPEM []byte) (string, error) {
+	block, _ := pem.Decode(certPEM)
+	if block == nil {
+		return "", fmt.Errorf("decoding certificate: no PEM block found")
+	}
+	sum := sha256FingerprintDER(block.Bytes)
+	return "sha256:" + sum, nil
 }
 
 // parseCA decodes PEM-encoded CA cert and key into their x509/ecdsa types.

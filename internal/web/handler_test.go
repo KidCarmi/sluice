@@ -3,6 +3,7 @@ package web
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -10,8 +11,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/KidCarmi/Sluice/internal/sanitizer"
+	"github.com/KidCarmi/Sluice/internal/worker"
 )
 
 // testLogger returns a silent logger for use in tests.
@@ -73,7 +76,17 @@ func newTestServer(t *testing.T) (*httptest.Server, *Handler) {
 	d.Register(sanitizer.NewOfficeSanitizer(logger))
 	d.Register(sanitizer.NewPDFSanitizer(logger))
 
-	h := NewHandler(d, logger, 10*1024*1024) // 10 MB limit
+	pool := worker.NewPool(worker.PoolConfig{
+		MaxWorkers: 2,
+		QueueDepth: 10,
+		JobTimeout: 10 * time.Second,
+	}, func(ctx context.Context, job worker.Job) (interface{}, error) {
+		return d.Dispatch(ctx, job.Data, job.Filename)
+	})
+	t.Cleanup(pool.Stop)
+
+	h := NewHandler(d, pool, logger, 10*1024*1024) // 10 MB limit
+	t.Cleanup(h.Stop)
 	mux := http.NewServeMux()
 	h.RegisterRoutes(mux)
 	srv := httptest.NewServer(mux)

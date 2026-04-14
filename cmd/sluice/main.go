@@ -14,6 +14,7 @@ import (
 	"github.com/KidCarmi/Sluice/internal/config"
 	"github.com/KidCarmi/Sluice/internal/sanitizer"
 	"github.com/KidCarmi/Sluice/internal/web"
+	"github.com/KidCarmi/Sluice/internal/worker"
 )
 
 var version = "0.1.0"
@@ -60,8 +61,18 @@ func main() {
 	dispatcher.Register(sanitizer.NewSVGSanitizer(logger))
 	dispatcher.Register(sanitizer.NewArchiveSanitizer(dispatcher, logger))
 
+	// Create worker pool for bounded concurrency
+	pool := worker.NewPool(worker.PoolConfig{
+		MaxWorkers: cfg.Workers.MaxConcurrent,
+		QueueDepth: cfg.Workers.QueueDepth,
+		JobTimeout: cfg.Workers.Timeout,
+	}, func(ctx context.Context, job worker.Job) (interface{}, error) {
+		return dispatcher.Dispatch(ctx, job.Data, job.Filename)
+	})
+	defer pool.Stop()
+
 	// Create web handler
-	webHandler := web.NewHandler(dispatcher, logger, cfg.Limits.MaxFileSize)
+	webHandler := web.NewHandler(dispatcher, pool, logger, cfg.Limits.MaxFileSize)
 
 	// Setup HTTP server with routes
 	mux := http.NewServeMux()

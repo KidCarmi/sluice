@@ -331,22 +331,28 @@ func TestPDFSanitizer_InvalidPDF(t *testing.T) {
 	s := newTestSanitizer()
 	data := []byte("this is not a PDF at all")
 	res, err := s.Sanitize(context.Background(), data, "bad.pdf")
-	if err == nil {
-		t.Fatal("expected error for invalid PDF")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
 	if res.Status != StatusError {
 		t.Errorf("expected StatusError, got %d", res.Status)
+	}
+	if res.Error == nil {
+		t.Error("expected Result.Error to be set")
 	}
 }
 
 func TestPDFSanitizer_EmptyFile(t *testing.T) {
 	s := newTestSanitizer()
 	res, err := s.Sanitize(context.Background(), []byte{}, "empty.pdf")
-	if err == nil {
-		t.Fatal("expected error for empty file")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
 	if res.Status != StatusError {
 		t.Errorf("expected StatusError, got %d", res.Status)
+	}
+	if res.Error == nil {
+		t.Error("expected Result.Error to be set")
 	}
 }
 

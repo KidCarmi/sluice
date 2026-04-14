@@ -70,9 +70,7 @@ func (s *ArchiveSanitizer) Sanitize(ctx context.Context, data []byte, filename s
 	// Check context before starting.
 	select {
 	case <-ctx.Done():
-		result.Status = StatusError
-		result.Error = fmt.Errorf("archive sanitize: %w", ctx.Err())
-		return result, result.Error
+		return nil, fmt.Errorf("archive sanitize: %w", ctx.Err())
 	default:
 	}
 
@@ -87,21 +85,21 @@ func (s *ArchiveSanitizer) Sanitize(ctx context.Context, data []byte, filename s
 			Description: fmt.Sprintf("archive nesting depth %d exceeds maximum of %d", depth, maxArchiveDepth),
 			Severity:    "critical",
 		}}
-		return result, result.Error
+		return result, nil
 	}
 
 	// Parse the ZIP archive.
 	if len(data) == 0 {
 		result.Status = StatusError
 		result.Error = fmt.Errorf("archive sanitize: empty input")
-		return result, result.Error
+		return result, nil
 	}
 
 	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
 	if err != nil {
 		result.Status = StatusError
 		result.Error = fmt.Errorf("archive sanitize: invalid zip: %w", err)
-		return result, result.Error
+		return result, nil
 	}
 
 	var (
@@ -118,9 +116,7 @@ func (s *ArchiveSanitizer) Sanitize(ctx context.Context, data []byte, filename s
 		// Check context between entries.
 		select {
 		case <-ctx.Done():
-			result.Status = StatusError
-			result.Error = fmt.Errorf("archive sanitize: %w", ctx.Err())
-			return result, result.Error
+			return nil, fmt.Errorf("archive sanitize: %w", ctx.Err())
 		default:
 		}
 
@@ -138,6 +134,16 @@ func (s *ArchiveSanitizer) Sanitize(ctx context.Context, data []byte, filename s
 				slog.String("entry", filepath.Base(name)),
 				slog.String("file", filepath.Base(filename)),
 			)
+			continue
+		}
+
+		if len(name) > 4096 {
+			threats = append(threats, Threat{
+				Type:        "oversized_path",
+				Location:    "entry name",
+				Description: fmt.Sprintf("ZIP entry name exceeds maximum length (%d chars)", len(name)),
+				Severity:    "medium",
+			})
 			continue
 		}
 
@@ -201,7 +207,7 @@ func (s *ArchiveSanitizer) Sanitize(ctx context.Context, data []byte, filename s
 		if err != nil {
 			result.Status = StatusError
 			result.Error = fmt.Errorf("archive sanitize: opening entry %q: %w", filepath.Base(name), err)
-			return result, result.Error
+			return result, nil
 		}
 
 		lr := io.LimitReader(rc, maxArchiveEntrySize+1)
@@ -210,7 +216,7 @@ func (s *ArchiveSanitizer) Sanitize(ctx context.Context, data []byte, filename s
 		if err != nil {
 			result.Status = StatusError
 			result.Error = fmt.Errorf("archive sanitize: reading entry %q: %w", filepath.Base(name), err)
-			return result, result.Error
+			return result, nil
 		}
 
 		if int64(len(entryData)) > maxArchiveEntrySize {
@@ -232,7 +238,7 @@ func (s *ArchiveSanitizer) Sanitize(ctx context.Context, data []byte, filename s
 				Description: fmt.Sprintf("total decompressed size exceeds %d bytes", maxArchiveDecompressed),
 				Severity:    "critical",
 			})
-			return result, result.Error
+			return result, nil
 		}
 
 		// Recursively sanitize through the dispatcher.
@@ -244,27 +250,27 @@ func (s *ArchiveSanitizer) Sanitize(ctx context.Context, data []byte, filename s
 				// Pass through unchanged.
 				s.logger.Debug("unsupported file type passed through unchanged", "entry", filepath.Base(name))
 			} else {
-				// Propagate blocked status from nested archives.
-				if subResult != nil && subResult.Status == StatusBlocked {
-					result.Status = StatusBlocked
-					result.Error = fmt.Errorf("archive sanitize: nested entry %q blocked: %w", filepath.Base(name), err)
-					// Collect threats from sub-result with prefixed location.
-					for _, th := range subResult.Threats {
-						threats = append(threats, Threat{
-							Type:        th.Type,
-							Location:    name + "/" + th.Location,
-							Description: th.Description,
-							Severity:    th.Severity,
-						})
-					}
-					result.Threats = threats
-					return result, result.Error
-				}
-				result.Status = StatusError
-				result.Error = fmt.Errorf("archive sanitize: dispatching entry %q: %w", filepath.Base(name), err)
-				return result, result.Error
+				// Context cancellation — propagate as (nil, error).
+				return nil, fmt.Errorf("archive sanitize: dispatching entry %q: %w", filepath.Base(name), err)
 			}
 		} else if subResult != nil {
+			// Propagate blocked status from nested archives.
+			if subResult.Status == StatusBlocked {
+				result.Status = StatusBlocked
+				result.Error = fmt.Errorf("archive sanitize: nested entry %q blocked", filepath.Base(name))
+				// Collect threats from sub-result with prefixed location.
+				for _, th := range subResult.Threats {
+					threats = append(threats, Threat{
+						Type:        th.Type,
+						Location:    name + "/" + th.Location,
+						Description: th.Description,
+						Severity:    th.Severity,
+					})
+				}
+				result.Threats = threats
+				return result, nil
+			}
+
 			// Collect threats with location prefixed by archive entry path.
 			for _, th := range subResult.Threats {
 				threats = append(threats, Threat{
@@ -286,19 +292,19 @@ func (s *ArchiveSanitizer) Sanitize(ctx context.Context, data []byte, filename s
 		if err != nil {
 			result.Status = StatusError
 			result.Error = fmt.Errorf("archive sanitize: creating output entry %q: %w", filepath.Base(name), err)
-			return result, result.Error
+			return result, nil
 		}
 		if _, err := fw.Write(outputData); err != nil {
 			result.Status = StatusError
 			result.Error = fmt.Errorf("archive sanitize: writing output entry %q: %w", filepath.Base(name), err)
-			return result, result.Error
+			return result, nil
 		}
 	}
 
 	if err := zw.Close(); err != nil {
 		result.Status = StatusError
 		result.Error = fmt.Errorf("archive sanitize: finalizing zip: %w", err)
-		return result, result.Error
+		return result, nil
 	}
 
 	result.Threats = threats

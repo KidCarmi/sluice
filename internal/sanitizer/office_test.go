@@ -276,8 +276,8 @@ func TestOfficeSanitizer_EmptyFile(t *testing.T) {
 	s := NewOfficeSanitizer(testLogger())
 
 	result, err := s.Sanitize(context.Background(), []byte{}, "empty.docx")
-	if err == nil {
-		t.Fatal("expected error for empty file")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
 	if result.Status != StatusError {
 		t.Errorf("expected StatusError, got %d", result.Status)
@@ -298,8 +298,8 @@ func TestOfficeSanitizer_ContextCancellation(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for cancelled context")
 	}
-	if result.Status != StatusError {
-		t.Errorf("expected StatusError, got %d", result.Status)
+	if result != nil {
+		t.Errorf("expected nil result for context cancellation, got %+v", result)
 	}
 }
 

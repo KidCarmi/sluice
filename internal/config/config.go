@@ -179,8 +179,20 @@ func validate(cfg *Config) error {
 	if cfg.Workers.MaxConcurrent <= 0 {
 		return fmt.Errorf("workers.max_concurrent must be > 0, got %d", cfg.Workers.MaxConcurrent)
 	}
+	if cfg.Workers.QueueDepth < 0 {
+		return fmt.Errorf("workers.queue_depth must be >= 0, got %d", cfg.Workers.QueueDepth)
+	}
+	if cfg.Workers.MaxConcurrent > 1000 {
+		return fmt.Errorf("workers.max_concurrent exceeds safe limit (1000), got %d", cfg.Workers.MaxConcurrent)
+	}
+	if cfg.Workers.Timeout > 0 && cfg.Workers.Timeout < time.Second {
+		return fmt.Errorf("workers.timeout must be >= 1s, got %v", cfg.Workers.Timeout)
+	}
 	if cfg.Limits.MaxFileSize <= 0 {
 		return fmt.Errorf("limits.max_file_size must be > 0, got %d", cfg.Limits.MaxFileSize)
+	}
+	if cfg.Limits.MaxFileSize > 500*1024*1024 {
+		return fmt.Errorf("limits.max_file_size exceeds safe limit (500MB), got %d", cfg.Limits.MaxFileSize)
 	}
 	return nil
 }

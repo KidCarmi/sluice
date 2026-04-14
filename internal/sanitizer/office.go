@@ -52,9 +52,7 @@ func (s *OfficeSanitizer) Sanitize(ctx context.Context, data []byte, filename st
 	// Check context before starting.
 	select {
 	case <-ctx.Done():
-		result.Status = StatusError
-		result.Error = fmt.Errorf("office sanitize: %w", ctx.Err())
-		return result, result.Error
+		return nil, fmt.Errorf("office sanitize: %w", ctx.Err())
 	default:
 	}
 
@@ -62,7 +60,7 @@ func (s *OfficeSanitizer) Sanitize(ctx context.Context, data []byte, filename st
 	if err != nil {
 		result.Status = StatusError
 		result.Error = fmt.Errorf("office sanitize: invalid zip: %w", err)
-		return result, result.Error
+		return result, nil
 	}
 
 	var (
@@ -76,9 +74,7 @@ func (s *OfficeSanitizer) Sanitize(ctx context.Context, data []byte, filename st
 		// Check context between entries.
 		select {
 		case <-ctx.Done():
-			result.Status = StatusError
-			result.Error = fmt.Errorf("office sanitize: %w", ctx.Err())
-			return result, result.Error
+			return nil, fmt.Errorf("office sanitize: %w", ctx.Err())
 		default:
 		}
 
@@ -96,6 +92,16 @@ func (s *OfficeSanitizer) Sanitize(ctx context.Context, data []byte, filename st
 				slog.String("entry", filepath.Base(name)),
 				slog.String("file", filepath.Base(filename)),
 			)
+			continue
+		}
+
+		if len(name) > 4096 {
+			threats = append(threats, Threat{
+				Type:        "oversized_path",
+				Location:    "entry name",
+				Description: fmt.Sprintf("ZIP entry name exceeds maximum length (%d chars)", len(name)),
+				Severity:    "medium",
+			})
 			continue
 		}
 
@@ -140,7 +146,8 @@ func (s *OfficeSanitizer) Sanitize(ctx context.Context, data []byte, filename st
 				Description: fmt.Sprintf("cumulative decompressed size exceeds %d bytes", maxDecompressedTotal),
 				Severity:    "critical",
 			})
-			return result, fmt.Errorf("office sanitize: cumulative decompressed size exceeds limit")
+			result.Error = fmt.Errorf("office sanitize: cumulative decompressed size exceeds limit")
+			return result, nil
 		}
 
 		// Check .rels files for external references.
@@ -163,19 +170,19 @@ func (s *OfficeSanitizer) Sanitize(ctx context.Context, data []byte, filename st
 		if err != nil {
 			result.Status = StatusError
 			result.Error = fmt.Errorf("office sanitize: creating entry %q: %w", filepath.Base(name), err)
-			return result, result.Error
+			return result, nil
 		}
 		if _, err := fw.Write(content); err != nil {
 			result.Status = StatusError
 			result.Error = fmt.Errorf("office sanitize: writing entry %q: %w", filepath.Base(name), err)
-			return result, result.Error
+			return result, nil
 		}
 	}
 
 	if err := zw.Close(); err != nil {
 		result.Status = StatusError
 		result.Error = fmt.Errorf("office sanitize: finalizing zip: %w", err)
-		return result, result.Error
+		return result, nil
 	}
 
 	result.Threats = threats

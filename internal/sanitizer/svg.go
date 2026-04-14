@@ -199,20 +199,20 @@ func (s *SVGSanitizer) Sanitize(ctx context.Context, data []byte, filename strin
 				}
 				inStyle = false
 				if styleDangerous {
-					// Dangerous CSS: drop the entire <style> element.
-					// Since we buffered the start element and content
-					// without writing, we simply skip — nothing to undo.
 					styleStart = nil
 					continue
 				}
-				// Clean CSS: write the buffered start element, content, and end element.
-				if styleStart != nil {
-					if err := encoder.EncodeToken(*styleStart); err != nil {
-						result.Status = StatusError
-						result.Error = fmt.Errorf("svg: encoding style start: %w", err)
-						return result, nil
-					}
+				// Clean CSS: write the buffered start, content, and end element.
+				if styleStart == nil {
+					// Defensive: should never happen since inStyle guards this path.
+					continue
 				}
+				if err := encoder.EncodeToken(*styleStart); err != nil {
+					result.Status = StatusError
+					result.Error = fmt.Errorf("svg: encoding style start: %w", err)
+					return result, nil
+				}
+				styleStart = nil
 				if css != "" {
 					if err := encoder.EncodeToken(xml.CharData([]byte(css))); err != nil {
 						result.Status = StatusError

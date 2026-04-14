@@ -141,6 +141,51 @@ func (s *ArchiveSanitizer) Sanitize(ctx context.Context, data []byte, filename s
 			continue
 		}
 
+		// Reject absolute paths (Unix).
+		if strings.HasPrefix(name, "/") {
+			threats = append(threats, Threat{
+				Type:        "path_traversal",
+				Location:    filepath.Base(name),
+				Description: "ZIP entry contains absolute path",
+				Severity:    "critical",
+			})
+			s.logger.Warn("rejecting absolute path entry",
+				slog.String("entry", filepath.Base(name)),
+				slog.String("file", filepath.Base(filename)),
+			)
+			continue
+		}
+
+		// Reject absolute paths (Windows).
+		if strings.HasPrefix(name, `\`) {
+			threats = append(threats, Threat{
+				Type:        "path_traversal",
+				Location:    filepath.Base(name),
+				Description: "ZIP entry contains Windows absolute path",
+				Severity:    "critical",
+			})
+			s.logger.Warn("rejecting Windows absolute path entry",
+				slog.String("entry", filepath.Base(name)),
+				slog.String("file", filepath.Base(filename)),
+			)
+			continue
+		}
+
+		// Reject entries with null bytes in the name.
+		if strings.Contains(name, "\x00") {
+			threats = append(threats, Threat{
+				Type:        "path_traversal",
+				Location:    filepath.Base(name),
+				Description: "ZIP entry name contains null byte",
+				Severity:    "critical",
+			})
+			s.logger.Warn("rejecting entry with null byte in name",
+				slog.String("entry", filepath.Base(name)),
+				slog.String("file", filepath.Base(filename)),
+			)
+			continue
+		}
+
 		// Size check: skip entries larger than maxArchiveEntrySize.
 		if entry.UncompressedSize64 > maxArchiveEntrySize {
 			s.logger.Warn("skipping oversized entry",

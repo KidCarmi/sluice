@@ -116,9 +116,18 @@ func (s *OfficeSanitizer) Sanitize(ctx context.Context, data []byte, filename st
 		// Read the entry content.
 		content, err := readZIPEntry(entry)
 		if err != nil {
-			result.Status = StatusError
-			result.Error = fmt.Errorf("office sanitize: reading entry %q: %w", filepath.Base(name), err)
-			return result, result.Error
+			s.logger.Warn("skipping entry due to read error",
+				slog.String("entry", filepath.Base(name)),
+				slog.String("error", err.Error()),
+				slog.String("file", filepath.Base(filename)),
+			)
+			threats = append(threats, Threat{
+				Type:        "oversized_entry",
+				Location:    filepath.Base(name),
+				Description: "Entry skipped: exceeds size limit",
+				Severity:    "medium",
+			})
+			continue
 		}
 
 		// Track cumulative decompressed size to detect zip bombs.

@@ -370,9 +370,9 @@
       <path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5"/>
     </svg>
     <div class="title">Drop a file here to sanitize</div>
-    <div class="subtitle">or <span>browse</span> your files &mdash; PDF, DOCX, XLSX, PPTX, JPEG, PNG, GIF</div>
+    <div class="subtitle">or <span>browse</span> your files &mdash; PDF, DOCX, XLSX, PPTX, JPEG, PNG, GIF, SVG, ZIP</div>
   </div>
-  <input type="file" id="file-input" accept=".pdf,.docx,.xlsx,.pptx,.docm,.xlsm,.pptm,.doc,.xls,.ppt,.jpg,.jpeg,.png,.gif">
+  <input type="file" id="file-input" accept=".pdf,.docx,.xlsx,.pptx,.docm,.xlsm,.pptm,.doc,.xls,.ppt,.jpg,.jpeg,.png,.gif,.svg,.zip">
 
   <!-- Sample Files -->
   <div style="display:flex;gap:10px;margin-bottom:24px;flex-wrap:wrap;align-items:center">
@@ -383,6 +383,7 @@
     <button class="sample-btn" onclick="testSample('clean.xlsx')">clean.xlsx</button>
     <button class="sample-btn" onclick="testSample('exif.jpg')">exif.jpg</button>
     <button class="sample-btn" onclick="testSample('clean.png')">clean.png</button>
+    <button class="sample-btn" onclick="testSample('xss.svg')">xss.svg</button>
   </div>
 
   <!-- Progress -->

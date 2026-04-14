@@ -292,7 +292,7 @@ func (h *Handler) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	h.jsonResponse(w, map[string]interface{}{
 		"healthy":         true,
 		"version":         "0.1.0",
-		"supported_types": []string{"pdf", "docx", "xlsx", "pptx", "jpeg", "png", "gif"},
+		"supported_types": []string{"pdf", "docx", "xlsx", "pptx", "jpeg", "png", "gif", "svg", "zip"},
 	}, http.StatusOK)
 }
 

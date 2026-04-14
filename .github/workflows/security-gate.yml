@@ -12,7 +12,6 @@ on:
 
 permissions:
   contents: read
-  security-events: write   # required for SARIF uploads (trivy, gosec)
 
 jobs:
   security-checks:
@@ -40,9 +39,9 @@ jobs:
       # 3. Static Application Security Testing with gosec
       # -----------------------------------------------------------------------
       - name: Run gosec
-        uses: securego/gosec@master
-        with:
-          args: ./...
+        run: |
+          go install github.com/securego/gosec/v2/cmd/gosec@latest
+          gosec ./...
 
       # -----------------------------------------------------------------------
       # 4. Go vulnerability database check
@@ -58,6 +57,7 @@ jobs:
       - name: Run gitleaks
         uses: gitleaks/gitleaks-action@v2
         env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
 
       # -----------------------------------------------------------------------

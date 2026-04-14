@@ -11,6 +11,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"os"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -79,13 +80,15 @@ type ThreatJSON struct {
 
 // downloadEntry holds a sanitized file available for download.
 type downloadEntry struct {
-	data      []byte
+	path      string    // path to temp file on disk
+	size      int64     // file size for Content-Length and accounting
 	filename  string
 	createdAt time.Time
 }
 
 const maxDownloads = 100
 const maxTotalDownloadBytes = 500 * 1024 * 1024 // 500MB
+const downloadTempDir = "/tmp/sluice-downloads"
 
 // requestIDKey is the context key for request ID propagation.
 type requestIDKey struct{}
@@ -113,6 +116,12 @@ type Handler struct {
 
 // NewHandler creates a new web handler.
 func NewHandler(dispatcher *sanitizer.Dispatcher, pool *worker.Pool, logger *slog.Logger, maxFileSize int64) *Handler {
+	// Clean stale temp files from previous runs, then recreate dir
+	_ = os.RemoveAll(downloadTempDir)
+	if err := os.MkdirAll(downloadTempDir, 0700); err != nil {
+		logger.Error("failed to create download temp dir", "error", err)
+	}
+
 	h := &Handler{
 		dispatcher:  dispatcher,
 		pool:        pool,
@@ -185,7 +194,7 @@ func (h *Handler) handleSanitize(w http.ResponseWriter, r *http.Request) {
 	// Limit request body to max file size + multipart overhead
 	r.Body = http.MaxBytesReader(w, r.Body, h.maxFileSize+4096)
 
-	err := r.ParseMultipartForm(h.maxFileSize) // #nosec G120 -- body is already bounded by MaxBytesReader above
+	err := r.ParseMultipartForm(1 << 20) // #nosec G120 -- 1MB in RAM, rest spills to disk; body bounded by MaxBytesReader
 	if err != nil {
 		h.jsonError(w, "file too large or invalid form data", http.StatusBadRequest)
 		return
@@ -290,45 +299,32 @@ func (h *Handler) handleSanitize(w http.ResponseWriter, r *http.Request) {
 	// Store sanitized file for download if we have data
 	if len(result.SanitizedData) > 0 {
 		id := generateSecureID()
-		h.mu.Lock()
-		h.downloads[id] = &downloadEntry{
-			data:      result.SanitizedData,
-			filename:  "sanitized_" + filename,
-			createdAt: time.Now(),
+
+		// Write sanitized data to temp file
+		tempPath, writeErr := writeDownloadFile(result.SanitizedData)
+		if writeErr != nil {
+			logger.Warn("failed to write download file", "error", writeErr)
+			// Continue without download — sanitization still succeeded
+		} else {
+			h.mu.Lock()
+			h.downloads[id] = &downloadEntry{
+				path:      tempPath,
+				size:      int64(len(result.SanitizedData)),
+				filename:  "sanitized_" + filename,
+				createdAt: time.Now(),
+			}
+			h.totalDownloadBytes += int64(len(result.SanitizedData))
+			// Evict oldest if over count cap
+			for len(h.downloads) > maxDownloads {
+				h.evictOldest()
+			}
+			// Evict oldest until under total size cap
+			for h.totalDownloadBytes > maxTotalDownloadBytes && len(h.downloads) > 0 {
+				h.evictOldest()
+			}
+			h.mu.Unlock()
+			resp.DownloadID = id
 		}
-		h.totalDownloadBytes += int64(len(result.SanitizedData))
-		// Evict oldest if over count cap
-		if len(h.downloads) > maxDownloads {
-			var oldestID string
-			var oldestTime time.Time
-			for did, de := range h.downloads {
-				if oldestID == "" || de.createdAt.Before(oldestTime) {
-					oldestID = did
-					oldestTime = de.createdAt
-				}
-			}
-			if oldestID != "" {
-				h.totalDownloadBytes -= int64(len(h.downloads[oldestID].data))
-				delete(h.downloads, oldestID)
-			}
-		}
-		// Evict oldest entries until under total size cap
-		for h.totalDownloadBytes > maxTotalDownloadBytes && len(h.downloads) > 0 {
-			var oldestID string
-			var oldestTime time.Time
-			for did, de := range h.downloads {
-				if oldestID == "" || de.createdAt.Before(oldestTime) {
-					oldestID = did
-					oldestTime = de.createdAt
-				}
-			}
-			if oldestID != "" {
-				h.totalDownloadBytes -= int64(len(h.downloads[oldestID].data))
-				delete(h.downloads, oldestID)
-			}
-		}
-		h.mu.Unlock()
-		resp.DownloadID = id
 	}
 
 	// Track errors for health check and degradation detection
@@ -380,9 +376,15 @@ func (h *Handler) handleDownload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/octet-stream")
+	f, err := os.Open(entry.path)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	defer func() { _ = f.Close() }()
+
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", entry.filename))
-	_, _ = w.Write(entry.data)
+	http.ServeContent(w, r, entry.filename, entry.createdAt, f)
 }
 
 func (h *Handler) handleHealth(w http.ResponseWriter, _ *http.Request) {
@@ -450,7 +452,8 @@ func (h *Handler) cleanupLoop() {
 			h.mu.Lock()
 			for id, entry := range h.downloads {
 				if time.Since(entry.createdAt) > 10*time.Minute {
-					h.totalDownloadBytes -= int64(len(entry.data))
+					h.totalDownloadBytes -= entry.size
+					_ = os.Remove(entry.path)
 					delete(h.downloads, id)
 				}
 			}
@@ -470,6 +473,14 @@ func (h *Handler) Stop() {
 	default:
 		close(h.stopCh)
 	}
+	// Clean up remaining download temp files
+	h.mu.Lock()
+	for _, entry := range h.downloads {
+		_ = os.Remove(entry.path)
+	}
+	h.downloads = make(map[string]*downloadEntry)
+	h.totalDownloadBytes = 0
+	h.mu.Unlock()
 }
 
 // GetStats returns the current stats (for use by metrics, gRPC health, etc.)
@@ -492,6 +503,45 @@ func (h *Handler) trackErrorStreak(ft sanitizer.FileType, isError bool) {
 		}
 	} else {
 		counter.Store(0) // reset on success
+	}
+}
+
+func writeDownloadFile(data []byte) (string, error) {
+	f, err := os.CreateTemp(downloadTempDir, "sluice-dl-*")
+	if err != nil {
+		return "", fmt.Errorf("creating temp file: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	// Enforce strict permissions
+	if err := f.Chmod(0600); err != nil {
+		_ = os.Remove(f.Name())
+		return "", fmt.Errorf("setting file permissions: %w", err)
+	}
+
+	if _, err := f.Write(data); err != nil {
+		_ = os.Remove(f.Name())
+		return "", fmt.Errorf("writing temp file: %w", err)
+	}
+	return f.Name(), nil
+}
+
+// evictOldest removes the oldest download entry and its temp file.
+// Must be called with h.mu held.
+func (h *Handler) evictOldest() {
+	var oldestID string
+	var oldestTime time.Time
+	for did, de := range h.downloads {
+		if oldestID == "" || de.createdAt.Before(oldestTime) {
+			oldestID = did
+			oldestTime = de.createdAt
+		}
+	}
+	if oldestID != "" {
+		entry := h.downloads[oldestID]
+		h.totalDownloadBytes -= entry.size
+		_ = os.Remove(entry.path)
+		delete(h.downloads, oldestID)
 	}
 }
 

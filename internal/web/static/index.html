@@ -1,0 +1,544 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sluice CDR Engine</title>
+<style>
+  :root {
+    --bg: #0f1117;
+    --surface: #1a1d27;
+    --surface2: #242736;
+    --border: #2e3140;
+    --text: #e4e4e7;
+    --text-dim: #8b8d98;
+    --accent: #3b82f6;
+    --accent-hover: #2563eb;
+    --green: #22c55e;
+    --yellow: #eab308;
+    --red: #ef4444;
+    --orange: #f97316;
+    --radius: 8px;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+  }
+  header {
+    border-bottom: 1px solid var(--border);
+    padding: 16px 24px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  header h1 {
+    font-size: 20px;
+    font-weight: 600;
+    letter-spacing: -0.02em;
+  }
+  header h1 span { color: var(--accent); }
+  header .version {
+    color: var(--text-dim);
+    font-size: 13px;
+    background: var(--surface2);
+    padding: 4px 10px;
+    border-radius: 12px;
+  }
+  .container {
+    max-width: 1100px;
+    margin: 0 auto;
+    padding: 24px;
+  }
+
+  /* Dashboard stats */
+  .stats-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 12px;
+    margin-bottom: 24px;
+  }
+  .stat-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 16px;
+    text-align: center;
+  }
+  .stat-card .value {
+    font-size: 28px;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+  }
+  .stat-card .label {
+    font-size: 12px;
+    color: var(--text-dim);
+    margin-top: 4px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  .stat-card.green .value { color: var(--green); }
+  .stat-card.yellow .value { color: var(--yellow); }
+  .stat-card.red .value { color: var(--red); }
+  .stat-card.blue .value { color: var(--accent); }
+
+  /* Upload area */
+  .upload-area {
+    background: var(--surface);
+    border: 2px dashed var(--border);
+    border-radius: var(--radius);
+    padding: 48px;
+    text-align: center;
+    cursor: pointer;
+    transition: border-color 0.2s, background 0.2s;
+    margin-bottom: 24px;
+  }
+  .upload-area:hover, .upload-area.drag-over {
+    border-color: var(--accent);
+    background: var(--surface2);
+  }
+  .upload-area svg {
+    width: 48px;
+    height: 48px;
+    color: var(--text-dim);
+    margin-bottom: 12px;
+  }
+  .upload-area .title {
+    font-size: 16px;
+    font-weight: 500;
+    margin-bottom: 8px;
+  }
+  .upload-area .subtitle {
+    color: var(--text-dim);
+    font-size: 14px;
+  }
+  .upload-area .subtitle span {
+    color: var(--accent);
+    text-decoration: underline;
+  }
+  .upload-area.uploading {
+    pointer-events: none;
+    opacity: 0.6;
+  }
+  #file-input { display: none; }
+
+  /* Progress */
+  .progress-bar {
+    display: none;
+    margin-bottom: 24px;
+  }
+  .progress-bar.active { display: block; }
+  .progress-track {
+    height: 4px;
+    background: var(--surface2);
+    border-radius: 2px;
+    overflow: hidden;
+  }
+  .progress-fill {
+    height: 100%;
+    background: var(--accent);
+    border-radius: 2px;
+    width: 0%;
+    transition: width 0.3s;
+    animation: indeterminate 1.5s infinite ease-in-out;
+  }
+  @keyframes indeterminate {
+    0% { width: 0%; margin-left: 0%; }
+    50% { width: 60%; margin-left: 20%; }
+    100% { width: 0%; margin-left: 100%; }
+  }
+  .progress-text {
+    font-size: 13px;
+    color: var(--text-dim);
+    margin-top: 8px;
+    text-align: center;
+  }
+
+  /* Results */
+  .result-panel {
+    display: none;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+    margin-bottom: 24px;
+  }
+  .result-panel.active { display: block; }
+  .result-header {
+    padding: 16px 20px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    border-bottom: 1px solid var(--border);
+  }
+  .result-status {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .status-badge {
+    padding: 4px 12px;
+    border-radius: 12px;
+    font-size: 13px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+  }
+  .status-clean { background: rgba(34,197,94,0.15); color: var(--green); }
+  .status-sanitized { background: rgba(234,179,8,0.15); color: var(--yellow); }
+  .status-blocked { background: rgba(239,68,68,0.15); color: var(--red); }
+  .status-error { background: rgba(239,68,68,0.15); color: var(--red); }
+  .status-unsupported { background: rgba(139,141,152,0.15); color: var(--text-dim); }
+
+  .result-meta {
+    padding: 16px 20px;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: 16px;
+    border-bottom: 1px solid var(--border);
+  }
+  .meta-item .meta-label {
+    font-size: 11px;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 4px;
+  }
+  .meta-item .meta-value {
+    font-size: 15px;
+    font-weight: 500;
+  }
+
+  /* Threats table */
+  .threats-section {
+    padding: 16px 20px;
+  }
+  .threats-section h3 {
+    font-size: 14px;
+    font-weight: 600;
+    margin-bottom: 12px;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  .threats-table {
+    width: 100%;
+    border-collapse: collapse;
+  }
+  .threats-table th {
+    text-align: left;
+    font-size: 11px;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border);
+  }
+  .threats-table td {
+    padding: 10px 12px;
+    font-size: 14px;
+    border-bottom: 1px solid var(--border);
+  }
+  .threats-table tr:last-child td { border-bottom: none; }
+  .severity-badge {
+    font-size: 11px;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 8px;
+    text-transform: uppercase;
+  }
+  .severity-critical { background: rgba(239,68,68,0.15); color: var(--red); }
+  .severity-high { background: rgba(249,115,22,0.15); color: var(--orange); }
+  .severity-medium { background: rgba(234,179,8,0.15); color: var(--yellow); }
+  .severity-low { background: rgba(34,197,94,0.15); color: var(--green); }
+
+  .no-threats {
+    color: var(--green);
+    font-size: 14px;
+    padding: 12px 0;
+  }
+
+  /* Download button */
+  .download-btn {
+    background: var(--accent);
+    color: white;
+    border: none;
+    padding: 8px 16px;
+    border-radius: var(--radius);
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background 0.2s;
+    text-decoration: none;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .download-btn:hover { background: var(--accent-hover); }
+
+  /* History */
+  .history-section {
+    margin-top: 24px;
+  }
+  .history-section h2 {
+    font-size: 16px;
+    font-weight: 600;
+    margin-bottom: 12px;
+  }
+  .history-list { list-style: none; }
+  .history-item {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 12px 16px;
+    margin-bottom: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 14px;
+    cursor: pointer;
+    transition: background 0.15s;
+  }
+  .history-item:hover { background: var(--surface2); }
+  .history-left {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .history-right {
+    color: var(--text-dim);
+    font-size: 12px;
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1><span>Sluice</span> CDR Engine</h1>
+  <div class="version" id="version">v0.1.0</div>
+</header>
+
+<div class="container">
+  <!-- Dashboard Stats -->
+  <div class="stats-grid" id="stats-grid">
+    <div class="stat-card blue">
+      <div class="value" id="stat-processed">0</div>
+      <div class="label">Processed</div>
+    </div>
+    <div class="stat-card green">
+      <div class="value" id="stat-clean">0</div>
+      <div class="label">Clean</div>
+    </div>
+    <div class="stat-card yellow">
+      <div class="value" id="stat-sanitized">0</div>
+      <div class="label">Sanitized</div>
+    </div>
+    <div class="stat-card red">
+      <div class="value" id="stat-threats">0</div>
+      <div class="label">Threats Removed</div>
+    </div>
+    <div class="stat-card red">
+      <div class="value" id="stat-blocked">0</div>
+      <div class="label">Blocked</div>
+    </div>
+    <div class="stat-card">
+      <div class="value" id="stat-unsupported">0</div>
+      <div class="label">Unsupported</div>
+    </div>
+  </div>
+
+  <!-- Upload Area -->
+  <div class="upload-area" id="upload-area">
+    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+      <path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5"/>
+    </svg>
+    <div class="title">Drop a file here to sanitize</div>
+    <div class="subtitle">or <span>browse</span> your files &mdash; PDF, DOCX, XLSX, PPTX</div>
+  </div>
+  <input type="file" id="file-input" accept=".pdf,.docx,.xlsx,.pptx,.docm,.xlsm,.pptm,.doc,.xls,.ppt">
+
+  <!-- Progress -->
+  <div class="progress-bar" id="progress-bar">
+    <div class="progress-track"><div class="progress-fill"></div></div>
+    <div class="progress-text" id="progress-text">Sanitizing...</div>
+  </div>
+
+  <!-- Result Panel -->
+  <div class="result-panel" id="result-panel">
+    <div class="result-header">
+      <div class="result-status">
+        <span class="status-badge" id="result-status-badge">CLEAN</span>
+        <span id="result-filename"></span>
+      </div>
+      <a class="download-btn" id="download-btn" style="display:none" href="#" download>
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2M7 10l5 5m0 0l5-5m-5 5V3"/></svg>
+        Download Sanitized
+      </a>
+    </div>
+    <div class="result-meta" id="result-meta"></div>
+    <div class="threats-section" id="threats-section">
+      <h3>Threats Detected</h3>
+      <div id="threats-content"></div>
+    </div>
+  </div>
+
+  <!-- History -->
+  <div class="history-section" id="history-section" style="display:none">
+    <h2>Recent Files</h2>
+    <ul class="history-list" id="history-list"></ul>
+  </div>
+</div>
+
+<script>
+const uploadArea = document.getElementById('upload-area');
+const fileInput = document.getElementById('file-input');
+const progressBar = document.getElementById('progress-bar');
+const progressText = document.getElementById('progress-text');
+const resultPanel = document.getElementById('result-panel');
+const historySection = document.getElementById('history-section');
+const historyList = document.getElementById('history-list');
+
+const history = [];
+
+// Drag & drop
+uploadArea.addEventListener('click', () => fileInput.click());
+uploadArea.addEventListener('dragover', (e) => { e.preventDefault(); uploadArea.classList.add('drag-over'); });
+uploadArea.addEventListener('dragleave', () => uploadArea.classList.remove('drag-over'));
+uploadArea.addEventListener('drop', (e) => {
+  e.preventDefault();
+  uploadArea.classList.remove('drag-over');
+  if (e.dataTransfer.files.length > 0) uploadFile(e.dataTransfer.files[0]);
+});
+fileInput.addEventListener('change', () => {
+  if (fileInput.files.length > 0) uploadFile(fileInput.files[0]);
+  fileInput.value = '';
+});
+
+async function uploadFile(file) {
+  uploadArea.classList.add('uploading');
+  progressBar.classList.add('active');
+  resultPanel.classList.remove('active');
+  progressText.textContent = `Sanitizing ${file.name} (${formatSize(file.size)})...`;
+
+  const form = new FormData();
+  form.append('file', file);
+
+  try {
+    const res = await fetch('/api/sanitize', { method: 'POST', body: form });
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    showResult(file.name, data);
+    history.unshift({ filename: file.name, ...data });
+    renderHistory();
+    refreshStats();
+  } catch (err) {
+    showError(file.name, err.message);
+  } finally {
+    uploadArea.classList.remove('uploading');
+    progressBar.classList.remove('active');
+  }
+}
+
+function showResult(filename, data) {
+  resultPanel.classList.add('active');
+
+  const badge = document.getElementById('result-status-badge');
+  badge.textContent = data.status.toUpperCase();
+  badge.className = 'status-badge status-' + data.status;
+
+  document.getElementById('result-filename').textContent = filename;
+
+  const meta = document.getElementById('result-meta');
+  meta.innerHTML = `
+    <div class="meta-item"><div class="meta-label">File Type</div><div class="meta-value">${data.original_type.toUpperCase()}</div></div>
+    <div class="meta-item"><div class="meta-label">Original Size</div><div class="meta-value">${formatSize(data.original_size)}</div></div>
+    <div class="meta-item"><div class="meta-label">Sanitized Size</div><div class="meta-value">${formatSize(data.sanitized_size)}</div></div>
+    <div class="meta-item"><div class="meta-label">Duration</div><div class="meta-value">${data.duration_ms} ms</div></div>
+    <div class="meta-item"><div class="meta-label">Threats Found</div><div class="meta-value">${data.threats ? data.threats.length : 0}</div></div>
+  `;
+
+  const threatsDiv = document.getElementById('threats-content');
+  if (data.threats && data.threats.length > 0) {
+    threatsDiv.innerHTML = `<table class="threats-table">
+      <thead><tr><th>Type</th><th>Location</th><th>Description</th><th>Severity</th></tr></thead>
+      <tbody>${data.threats.map(t => `
+        <tr>
+          <td>${esc(t.type)}</td>
+          <td><code>${esc(t.location)}</code></td>
+          <td>${esc(t.description)}</td>
+          <td><span class="severity-badge severity-${t.severity}">${t.severity}</span></td>
+        </tr>`).join('')}
+      </tbody></table>`;
+  } else {
+    threatsDiv.innerHTML = '<div class="no-threats">No threats detected &mdash; file is clean.</div>';
+  }
+
+  const dlBtn = document.getElementById('download-btn');
+  if (data.download_id) {
+    dlBtn.href = '/api/download/' + data.download_id;
+    dlBtn.style.display = 'inline-flex';
+  } else {
+    dlBtn.style.display = 'none';
+  }
+}
+
+function showError(filename, message) {
+  resultPanel.classList.add('active');
+  const badge = document.getElementById('result-status-badge');
+  badge.textContent = 'ERROR';
+  badge.className = 'status-badge status-error';
+  document.getElementById('result-filename').textContent = filename;
+  document.getElementById('result-meta').innerHTML = `
+    <div class="meta-item"><div class="meta-label">Error</div><div class="meta-value" style="color:var(--red)">${esc(message)}</div></div>
+  `;
+  document.getElementById('threats-content').innerHTML = '';
+  document.getElementById('download-btn').style.display = 'none';
+}
+
+function renderHistory() {
+  if (history.length === 0) { historySection.style.display = 'none'; return; }
+  historySection.style.display = 'block';
+  historyList.innerHTML = history.slice(0, 20).map((h, i) => `
+    <li class="history-item" onclick="showResult('${esc(h.filename)}', history[${i}])">
+      <div class="history-left">
+        <span class="status-badge status-${h.status}" style="font-size:11px">${h.status}</span>
+        <span>${esc(h.filename)}</span>
+      </div>
+      <div class="history-right">${h.threats ? h.threats.length : 0} threats &middot; ${h.duration_ms}ms</div>
+    </li>
+  `).join('');
+}
+
+async function refreshStats() {
+  try {
+    const res = await fetch('/api/stats');
+    const s = await res.json();
+    document.getElementById('stat-processed').textContent = s.files_processed;
+    document.getElementById('stat-clean').textContent = s.files_clean;
+    document.getElementById('stat-sanitized').textContent = s.files_sanitized;
+    document.getElementById('stat-threats').textContent = s.threats_removed;
+    document.getElementById('stat-blocked').textContent = s.files_blocked;
+    document.getElementById('stat-unsupported').textContent = s.files_unsupported;
+  } catch (e) { /* stats refresh is best-effort */ }
+}
+
+function formatSize(bytes) {
+  if (!bytes || bytes === 0) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(1024));
+  return (bytes / Math.pow(1024, i)).toFixed(i > 0 ? 1 : 0) + ' ' + units[i];
+}
+
+function esc(s) {
+  const d = document.createElement('div');
+  d.textContent = s || '';
+  return d.innerHTML;
+}
+
+// Poll stats every 5 seconds
+refreshStats();
+setInterval(refreshStats, 5000);
+</script>
+</body>
+</html>

@@ -1,0 +1,86 @@
+syntax = "proto3";
+package sluice.v1;
+
+option go_package = "github.com/KidCarmi/Sluice/proto/sluicev1";
+
+service SluiceService {
+  // Sanitize processes a file and returns the sanitized version.
+  // Streaming: client sends file chunks, server returns sanitized chunks.
+  rpc Sanitize(stream SanitizeRequest) returns (stream SanitizeResponse);
+
+  // Health returns the service status and capabilities.
+  rpc Health(HealthRequest) returns (HealthResponse);
+
+  // Enroll exchanges an enrollment token for mTLS client certificates.
+  rpc Enroll(EnrollRequest) returns (EnrollResponse);
+}
+
+message SanitizeRequest {
+  oneof payload {
+    SanitizeHeader header = 1;
+    bytes chunk = 2;
+  }
+}
+
+message SanitizeHeader {
+  string filename = 1;
+  string content_type = 2;
+  int64 content_length = 3;
+  string request_id = 4;
+  string trace_parent = 5;
+}
+
+message SanitizeResponse {
+  oneof payload {
+    SanitizeResult result = 1;
+    bytes chunk = 2;
+  }
+}
+
+message SanitizeResult {
+  Status status = 1;
+  string original_type = 2;
+  int64 original_size = 3;
+  int64 sanitized_size = 4;
+  repeated Threat threats_removed = 5;
+  string error_message = 6;
+}
+
+enum Status {
+  CLEAN = 0;
+  SANITIZED = 1;
+  BLOCKED = 2;
+  ERROR = 3;
+  UNSUPPORTED = 4;
+}
+
+message Threat {
+  string type = 1;
+  string location = 2;
+  string description = 3;
+  string severity = 4;
+}
+
+message HealthRequest {}
+
+message HealthResponse {
+  bool healthy = 1;
+  string version = 2;
+  repeated string supported_types = 3;
+  int32 active_workers = 4;
+  int32 max_workers = 5;
+  int32 queue_depth = 6;
+  int64 files_processed = 7;
+  int64 threats_removed = 8;
+}
+
+message EnrollRequest {
+  string token = 1;
+}
+
+message EnrollResponse {
+  bytes ca_cert = 1;
+  bytes client_cert = 2;
+  bytes client_key = 3;
+  string endpoint = 4;
+}

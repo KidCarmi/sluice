@@ -7,8 +7,8 @@ Day-2 operations for operators running Sluice alongside Culvert.
 ## Upgrade
 
 ```bash
-docker compose -f deploy/docker-compose.prod.yml pull
-docker compose -f deploy/docker-compose.prod.yml up -d
+docker compose -f deploy/docker-compose.yml pull
+docker compose -f deploy/docker-compose.yml up -d
 ```
 
 Sluice is stateless; no migrations. Enrolled clients keep working —
@@ -80,7 +80,7 @@ client cert, then re-enroll the trustworthy nodes.
    `workers.timeout`).
 3. Stop the container:
    ```bash
-   docker compose -f deploy/docker-compose.prod.yml down
+   docker compose -f deploy/docker-compose.yml down
    ```
 4. Sluice's `GracefulStop` honors in-flight streams up to 35s before
    forcing a shutdown.

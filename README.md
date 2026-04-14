@@ -72,10 +72,14 @@ Two compose files ship under `deploy/`:
 
 | File | Purpose | Testing UI |
 |------|---------|------------|
-| `deploy/docker-compose.yml` | Developer laptop | Enabled (HTTPS + bearer auth) |
-| `deploy/docker-compose.prod.yml` | Production | Disabled, mTLS-only |
+| `deploy/docker-compose.yml` | Production (default) | Disabled, mTLS-only |
+| `deploy/docker-compose.dev.yml` | Developer laptop | Enabled (HTTPS + bearer auth) |
 
-Use prod unless you are actively debugging.
+Use the default unless you are actively debugging. Dev overlay:
+
+```bash
+docker compose -f deploy/docker-compose.dev.yml up --build
+```
 
 ---
 

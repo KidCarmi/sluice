@@ -97,9 +97,12 @@ func (s *SVGSanitizer) Sanitize(ctx context.Context, data []byte, filename strin
 	decoder.AutoClose = xml.HTMLAutoClose
 	encoder := xml.NewEncoder(&out)
 
-	skipDepth := 0     // >0 means we are inside a stripped element
-	inStyle := false   // true when inside a non-stripped <style> element
+	skipDepth := 0        // >0 means we are inside a stripped element
+	inStyle := false      // true when inside a non-stripped <style> element
+	var styleStart *xml.StartElement // buffered <style> start element (not yet written)
 	var styleContent bytes.Buffer
+	tokenCount := 0
+	const maxTokens = 1_000_000 // guard against XML entity expansion / billion laughs
 
 	for {
 		// Check for cancellation periodically.
@@ -116,6 +119,13 @@ func (s *SVGSanitizer) Sanitize(ctx context.Context, data []byte, filename strin
 		if err != nil {
 			result.Status = StatusError
 			result.Error = fmt.Errorf("svg: parsing XML: %w", err)
+			return result, nil
+		}
+
+		tokenCount++
+		if tokenCount > maxTokens {
+			result.Status = StatusBlocked
+			result.Error = fmt.Errorf("svg: exceeded maximum token count (%d), possible entity expansion attack", maxTokens)
 			return result, nil
 		}
 
@@ -141,20 +151,16 @@ func (s *SVGSanitizer) Sanitize(ctx context.Context, data []byte, filename strin
 				continue
 			}
 
-			// Check <style> elements — we need to buffer their content
-			// to inspect for dangerous CSS.
+			// Check <style> elements — buffer the start element and content,
+			// inspect CSS for dangerous patterns before writing anything.
 			if localLower == "style" {
 				inStyle = true
 				styleContent.Reset()
-				// Filter attributes on the style element itself.
 				cleanAttrs, attrThreats := filterAttributes(t)
 				threats = append(threats, attrThreats...)
 				t.Attr = cleanAttrs
-				if err := encoder.EncodeToken(t); err != nil {
-					result.Status = StatusError
-					result.Error = fmt.Errorf("svg: encoding token: %w", err)
-					return result, nil
-				}
+				copied := t.Copy()
+				styleStart = &copied
 				continue
 			}
 
@@ -193,32 +199,31 @@ func (s *SVGSanitizer) Sanitize(ctx context.Context, data []byte, filename strin
 				}
 				inStyle = false
 				if styleDangerous {
-					// Remove the style start element we already wrote
-					// by resetting. We need a different approach: since
-					// we already encoded the start element, we strip by
-					// not writing the char data and end element, and
-					// remove the start element from the output.
-					// Actually, we need to remove the already-written
-					// start element. A simpler approach: mark as
-					// needing removal and do a post-pass. Instead,
-					// let's just skip the content and the end tag, and
-					// remove the <style> from the buffer.
-					trimStyleFromOutput(&out)
-				} else {
-					// Write the buffered style content and close tag.
-					if css != "" {
-						charData := xml.CharData([]byte(css))
-						if err := encoder.EncodeToken(charData); err != nil {
-							result.Status = StatusError
-							result.Error = fmt.Errorf("svg: encoding style content: %w", err)
-							return result, nil
-						}
-					}
-					if err := encoder.EncodeToken(t); err != nil {
+					// Dangerous CSS: drop the entire <style> element.
+					// Since we buffered the start element and content
+					// without writing, we simply skip — nothing to undo.
+					styleStart = nil
+					continue
+				}
+				// Clean CSS: write the buffered start element, content, and end element.
+				if styleStart != nil {
+					if err := encoder.EncodeToken(*styleStart); err != nil {
 						result.Status = StatusError
-						result.Error = fmt.Errorf("svg: encoding token: %w", err)
+						result.Error = fmt.Errorf("svg: encoding style start: %w", err)
 						return result, nil
 					}
+				}
+				if css != "" {
+					if err := encoder.EncodeToken(xml.CharData([]byte(css))); err != nil {
+						result.Status = StatusError
+						result.Error = fmt.Errorf("svg: encoding style content: %w", err)
+						return result, nil
+					}
+				}
+				if err := encoder.EncodeToken(t); err != nil {
+					result.Status = StatusError
+					result.Error = fmt.Errorf("svg: encoding token: %w", err)
+					return result, nil
 				}
 				continue
 			}
@@ -423,17 +428,3 @@ func filterAttributes(elem xml.StartElement) ([]xml.Attr, []Threat) {
 	return clean, threats
 }
 
-// trimStyleFromOutput removes the last <style...> opening tag from the
-// output buffer. This is used when we discover the style content is
-// dangerous after we already wrote the start element.
-func trimStyleFromOutput(buf *bytes.Buffer) {
-	data := buf.Bytes()
-	// Find the last occurrence of "<style" (case-insensitive) in the output.
-	lower := bytes.ToLower(data)
-	idx := bytes.LastIndex(lower, []byte("<style"))
-	if idx < 0 {
-		return
-	}
-	buf.Reset()
-	buf.Write(data[:idx])
-}

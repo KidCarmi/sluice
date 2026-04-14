@@ -311,6 +311,22 @@
     color: var(--text-dim);
     font-size: 12px;
   }
+  .sample-btn {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    color: var(--accent);
+    padding: 6px 14px;
+    border-radius: var(--radius);
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s;
+    font-family: monospace;
+  }
+  .sample-btn:hover {
+    background: var(--surface);
+    border-color: var(--accent);
+  }
 </style>
 </head>
 <body>
@@ -358,6 +374,15 @@
   </div>
   <input type="file" id="file-input" accept=".pdf,.docx,.xlsx,.pptx,.docm,.xlsm,.pptm,.doc,.xls,.ppt">
 
+  <!-- Sample Files -->
+  <div style="display:flex;gap:10px;margin-bottom:24px;flex-wrap:wrap;align-items:center">
+    <span style="color:var(--text-dim);font-size:13px">Try samples:</span>
+    <button class="sample-btn" onclick="testSample('macro.docm')">macro.docm</button>
+    <button class="sample-btn" onclick="testSample('js.pdf')">js.pdf</button>
+    <button class="sample-btn" onclick="testSample('clean.docx')">clean.docx</button>
+    <button class="sample-btn" onclick="testSample('clean.xlsx')">clean.xlsx</button>
+  </div>
+
   <!-- Progress -->
   <div class="progress-bar" id="progress-bar">
     <div class="progress-track"><div class="progress-fill"></div></div>
@@ -400,6 +425,14 @@ const historySection = document.getElementById('history-section');
 const historyList = document.getElementById('history-list');
 
 const history = [];
+
+// Sample file testing
+async function testSample(name) {
+  const res = await fetch('/api/samples?name=' + encodeURIComponent(name));
+  const blob = await res.blob();
+  const file = new File([blob], name, { type: 'application/octet-stream' });
+  uploadFile(file);
+}
 
 // Drag & drop
 uploadArea.addEventListener('click', () => fileInput.click());

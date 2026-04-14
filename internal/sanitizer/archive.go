@@ -242,6 +242,7 @@ func (s *ArchiveSanitizer) Sanitize(ctx context.Context, data []byte, filename s
 			// If the file type is unsupported, pass through unchanged.
 			if subResult != nil && subResult.Status == StatusUnsupported {
 				// Pass through unchanged.
+				s.logger.Debug("unsupported file type passed through unchanged", "entry", filepath.Base(name))
 			} else {
 				// Propagate blocked status from nested archives.
 				if subResult != nil && subResult.Status == StatusBlocked {

@@ -89,6 +89,12 @@ func (s *ImageSanitizer) Sanitize(ctx context.Context, data []byte, filename str
 		return result, nil
 	}
 
+	if int64(buf.Len()) > maxImageSize {
+		result.Status = StatusError
+		result.Error = fmt.Errorf("re-encoded image exceeds maximum size (%d bytes)", buf.Len())
+		return result, nil
+	}
+
 	result.SanitizedData = buf.Bytes()
 	result.SanitizedSize = int64(len(result.SanitizedData))
 	result.Threats = threats

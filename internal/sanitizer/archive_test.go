@@ -224,22 +224,28 @@ func TestArchiveSanitizer_EmptyZIP(t *testing.T) {
 func TestArchiveSanitizer_InvalidZIP(t *testing.T) {
 	s := newTestArchiveSanitizer()
 	result, err := s.Sanitize(context.Background(), []byte("this is not a zip file at all"), "bad.zip")
-	if err == nil {
-		t.Fatal("expected error for invalid ZIP")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
 	if result.Status != StatusError {
 		t.Errorf("expected StatusError, got %d", result.Status)
+	}
+	if result.Error == nil {
+		t.Error("expected Result.Error to be set")
 	}
 }
 
 func TestArchiveSanitizer_EmptyInput(t *testing.T) {
 	s := newTestArchiveSanitizer()
 	result, err := s.Sanitize(context.Background(), []byte{}, "empty.zip")
-	if err == nil {
-		t.Fatal("expected error for empty input")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
 	if result.Status != StatusError {
 		t.Errorf("expected StatusError, got %d", result.Status)
+	}
+	if result.Error == nil {
+		t.Error("expected Result.Error to be set")
 	}
 }
 
@@ -256,8 +262,8 @@ func TestArchiveSanitizer_ContextCancellation(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for cancelled context")
 	}
-	if result.Status != StatusError {
-		t.Errorf("expected StatusError, got %d", result.Status)
+	if result != nil {
+		t.Errorf("expected nil result for context cancellation, got %+v", result)
 	}
 }
 
@@ -316,8 +322,8 @@ func TestArchiveSanitizer_MaxDepth(t *testing.T) {
 	result, err := s.Sanitize(context.Background(), level1, "deep.zip")
 
 	// The result should be blocked because nesting is too deep.
-	if err == nil {
-		t.Fatal("expected error for max depth exceeded")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
 	if result.Status != StatusBlocked {
 		t.Errorf("expected StatusBlocked, got %d", result.Status)

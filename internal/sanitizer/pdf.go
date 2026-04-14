@@ -186,7 +186,7 @@ func (s *PDFSanitizer) Sanitize(ctx context.Context, data []byte, filename strin
 			OriginalType: FileTypePDF,
 			OriginalSize: int64(len(data)),
 			Error:        fmt.Errorf("pdf: reading input: %w", err),
-		}, fmt.Errorf("pdf: reading input: %w", err)
+		}, nil
 	}
 
 	// Check for cancellation before doing any work.
@@ -204,7 +204,7 @@ func (s *PDFSanitizer) Sanitize(ctx context.Context, data []byte, filename strin
 			OriginalType: FileTypePDF,
 			OriginalSize: int64(len(bounded)),
 			Error:        fmt.Errorf("pdf: invalid file, missing %%PDF header"),
-		}, fmt.Errorf("pdf: invalid file, missing %%PDF header")
+		}, nil
 	}
 
 	originalSize := int64(len(bounded))

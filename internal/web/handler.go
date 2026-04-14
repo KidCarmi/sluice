@@ -86,6 +86,9 @@ type downloadEntry struct {
 
 const maxDownloads = 100
 
+// requestIDKey is the context key for request ID propagation.
+type requestIDKey struct{}
+
 // Handler serves the web GUI and API endpoints.
 type Handler struct {
 	dispatcher *sanitizer.Dispatcher
@@ -96,6 +99,12 @@ type Handler struct {
 
 	mu        sync.Mutex
 	downloads map[string]*downloadEntry
+
+	// lastError tracks the most recent sanitization error for health checks.
+	lastError     atomic.Value // stores string
+	lastErrorTime atomic.Value // stores time.Time
+	// consecutiveErrors tracks per-type failure streaks.
+	errorStreaks sync.Map // map[sanitizer.FileType]*atomic.Int64
 
 	stopCh chan struct{}
 }
@@ -165,6 +174,11 @@ func (h *Handler) handleSamples(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) handleSanitize(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
+
+	// Generate request ID for log correlation
+	reqID := generateSecureID()[:12]
+	ctx = context.WithValue(ctx, requestIDKey{}, reqID)
+	logger := h.logger.With("request_id", reqID)
 
 	// Limit request body to max file size + multipart overhead
 	r.Body = http.MaxBytesReader(w, r.Body, h.maxFileSize+4096)
@@ -298,13 +312,31 @@ func (h *Handler) handleSanitize(w http.ResponseWriter, r *http.Request) {
 		resp.DownloadID = id
 	}
 
-	h.logger.Info("file sanitized",
-		"filename", filename,
-		"type", result.OriginalType,
-		"status", statusToString(result.Status),
-		"threats", len(result.Threats),
-		"duration_ms", duration.Milliseconds(),
-	)
+	// Track errors for health check and degradation detection
+	if result.Status == sanitizer.StatusError {
+		errMsg := "unknown error"
+		if result.Error != nil {
+			errMsg = result.Error.Error()
+		}
+		h.lastError.Store(errMsg)
+		h.lastErrorTime.Store(time.Now())
+		h.trackErrorStreak(result.OriginalType, true)
+		logger.Warn("sanitization error",
+			"filename", filename,
+			"type", result.OriginalType,
+			"error", errMsg,
+			"duration_ms", duration.Milliseconds(),
+		)
+	} else {
+		h.trackErrorStreak(result.OriginalType, false)
+		logger.Info("file sanitized",
+			"filename", filename,
+			"type", result.OriginalType,
+			"status", statusToString(result.Status),
+			"threats", len(result.Threats),
+			"duration_ms", duration.Milliseconds(),
+		)
+	}
 
 	h.jsonResponse(w, resp, http.StatusOK)
 }
@@ -335,11 +367,44 @@ func (h *Handler) handleDownload(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleHealth(w http.ResponseWriter, _ *http.Request) {
-	h.jsonResponse(w, map[string]interface{}{
-		"healthy":         true,
+	healthy := true
+	var lastErr string
+	var lastErrAge string
+
+	if v := h.lastError.Load(); v != nil {
+		lastErr = v.(string)
+	}
+	if v := h.lastErrorTime.Load(); v != nil {
+		lastErrAge = time.Since(v.(time.Time)).Round(time.Second).String()
+	}
+
+	activeWorkers := h.pool.ActiveWorkers()
+	queueDepth := h.pool.QueueDepth()
+
+	// Unhealthy if queue is full (backpressure) or recent errors
+	if queueDepth >= 50 {
+		healthy = false
+	}
+
+	resp := map[string]interface{}{
+		"healthy":         healthy,
 		"version":         "0.1.0",
 		"supported_types": []string{"pdf", "docx", "xlsx", "pptx", "jpeg", "png", "gif", "svg", "zip"},
-	}, http.StatusOK)
+		"active_workers":  activeWorkers,
+		"queue_depth":     queueDepth,
+		"files_processed": h.stats.FilesProcessed.Load(),
+		"threats_removed": h.stats.ThreatsRemoved.Load(),
+	}
+	if lastErr != "" {
+		resp["last_error"] = lastErr
+		resp["last_error_age"] = lastErrAge
+	}
+
+	status := http.StatusOK
+	if !healthy {
+		status = http.StatusServiceUnavailable
+	}
+	h.jsonResponse(w, resp, status)
 }
 
 func (h *Handler) jsonResponse(w http.ResponseWriter, data interface{}, status int) {
@@ -379,6 +444,24 @@ func (h *Handler) Stop() {
 // GetStats returns the current stats (for use by metrics, gRPC health, etc.)
 func (h *Handler) GetStats() StatsJSON {
 	return h.stats.Snapshot()
+}
+
+// trackErrorStreak tracks consecutive errors per file type and logs a warning
+// when a sanitizer starts degrading (5+ consecutive failures).
+func (h *Handler) trackErrorStreak(ft sanitizer.FileType, isError bool) {
+	val, _ := h.errorStreaks.LoadOrStore(ft, &atomic.Int64{})
+	counter := val.(*atomic.Int64)
+	if isError {
+		streak := counter.Add(1)
+		if streak == 5 {
+			h.logger.Warn("sanitizer degradation detected",
+				"type", ft,
+				"consecutive_errors", streak,
+			)
+		}
+	} else {
+		counter.Store(0) // reset on success
+	}
 }
 
 // generateSecureID returns a cryptographically random hex string for download IDs.

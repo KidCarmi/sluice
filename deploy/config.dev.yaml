@@ -1,0 +1,42 @@
+# Development overrides. Loaded by deploy/docker-compose.yml.
+# Do NOT use this config in production — testing_ui is ON.
+
+server:
+  grpc_addr: ":8443"
+  tls:
+    cert_file: /data/tls/server.pem
+    key_file:  /data/tls/server-key.pem
+    ca_file:   /data/tls/ca.pem
+
+workers:
+  max_concurrent: 10
+  queue_depth: 50
+  timeout: 30s
+
+limits:
+  max_file_size: 52428800         # 50 MB
+  max_decompressed_size: 104857600
+
+logging:
+  format: json
+  level: info
+
+metrics:
+  prometheus_addr: ":9090"
+
+enrollment:
+  enabled: true
+  token_file: /data/enrollment_token
+  token_ttl: 24h
+
+testing_ui:
+  enabled: true
+  addr: "0.0.0.0:8080"           # Dev: accept LAN connections; still requires auth.
+  require_auth: true
+  auth_token_file: /data/ui_token
+  max_uploads_per_hour: 60
+  max_file_size: 10485760        # 10 MB
+  use_tls: true
+
+cli:
+  socket_path: /data/sluice.sock

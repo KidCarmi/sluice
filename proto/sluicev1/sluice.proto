@@ -5,13 +5,18 @@ option go_package = "github.com/KidCarmi/Sluice/proto/sluicev1";
 
 service SluiceService {
   // Sanitize processes a file and returns the sanitized version.
-  // Streaming: client sends file chunks, server returns sanitized chunks.
+  // Streaming: client sends SanitizeHeader first, then bytes chunks.
+  // Server responds with SanitizeResult first (always atomically),
+  // then zero or more bytes chunks of sanitized content.
+  // Do NOT interleave Threat objects after chunks start.
   rpc Sanitize(stream SanitizeRequest) returns (stream SanitizeResponse);
 
-  // Health returns the service status and capabilities.
+  // Health returns the service status, capabilities, and available profiles.
   rpc Health(HealthRequest) returns (HealthResponse);
 
-  // Enroll exchanges an enrollment token for mTLS client certificates.
+  // Enroll exchanges a one-time enrollment token for mTLS client certificates.
+  // Does NOT require a client cert (chicken-and-egg). Clients must TOFU-verify
+  // the server cert fingerprint before sending the token.
   rpc Enroll(EnrollRequest) returns (EnrollResponse);
 }
 
@@ -27,7 +32,39 @@ message SanitizeHeader {
   string content_type = 2;
   int64 content_length = 3;
   string request_id = 4;
-  string trace_parent = 5;
+  string trace_parent = 5;         // W3C Traceparent: 00-<trace-id>-<parent-id>-<flags>
+
+  // v0.1 — Culvert control-plane context (all optional, opaque to Sluice):
+
+  // profile_name: name of the sanitization profile to apply.
+  // Empty string is equivalent to "default".
+  // Unknown names MUST be rejected with Status=ERROR and
+  // error_message="unknown_profile: <name>".
+  string profile_name = 6;
+
+  // mode: how Sluice should treat threats. Server-enforced.
+  Mode mode = 7;
+
+  // tags: opaque key/value labels. Echoed in logs/metrics only; never
+  // branched on. Low-cardinality keys (direction, dest_category) may
+  // become Prometheus labels; high-cardinality values go to logs only.
+  map<string, string> tags = 8;
+
+  // policy_version: opaque hash of Culvert's active policy snapshot.
+  // Logged for audit correlation. MUST NOT be used as a metric label
+  // (cardinality explosion).
+  string policy_version = 9;
+}
+
+enum Mode {
+  // ENFORCE: default. Strip threats and return sanitized bytes.
+  ENFORCE = 0;
+  // REPORT_ONLY: detect only. Return original bytes unchanged + threat list.
+  // Server MUST NOT alter bytes, regardless of what the profile would do.
+  REPORT_ONLY = 1;
+  // BYPASS_WITH_REPORT: same byte semantics as REPORT_ONLY. Culvert signals
+  // VIP/monitor intent via this value; Sluice treats it identically.
+  BYPASS_WITH_REPORT = 2;
 }
 
 message SanitizeResponse {
@@ -41,9 +78,18 @@ message SanitizeResult {
   Status status = 1;
   string original_type = 2;
   int64 original_size = 3;
+  // sanitized_size: size of bytes returned to the client.
+  // In REPORT_ONLY / BYPASS_WITH_REPORT modes this equals original_size
+  // because the server returns the original bytes unchanged. The
+  // "what-would-have-been-sanitized" size is implicit from threats_removed.
   int64 sanitized_size = 4;
   repeated Threat threats_removed = 5;
   string error_message = 6;
+  // sanitized_sha256: SHA-256 of the bytes returned. Lets the client's
+  // hash cache skip re-sanitizing identical outputs.
+  bytes sanitized_sha256 = 7;
+  // duration_ms: server-side wall-clock sanitization time.
+  int64 duration_ms = 8;
 }
 
 enum Status {
@@ -55,9 +101,12 @@ enum Status {
 }
 
 message Threat {
+  // type: opaque, lowercase snake_case (macro, ole_object, javascript,
+  // external_ref, launch_action, embedded_file, xfa_form, ...).
   string type = 1;
   string location = 2;
   string description = 3;
+  // severity: MUST be exactly one of {low, medium, high, critical}.
   string severity = 4;
 }
 
@@ -72,6 +121,21 @@ message HealthResponse {
   int32 queue_depth = 6;
   int64 files_processed = 7;
   int64 threats_removed = 8;
+  // profiles: sanitization profiles this server offers. Used by Culvert's
+  // admin GUI to present a profile picker. v0.1 ships with a single
+  // "default" profile; v0.2+ adds aggressive, relaxed, etc.
+  repeated Profile profiles = 9;
+}
+
+message Profile {
+  // name: lowercase-hyphenated, stable once published. "default" is reserved.
+  string name = 1;
+  string description = 2;
+  // capabilities: opaque strings describing what this profile does
+  // (e.g. strip_macros, strip_js, strip_ole, re_encode_images, strip_xfa).
+  repeated string capabilities = 3;
+  // max_file_size_bytes: 0 = use server default.
+  int64 max_file_size_bytes = 4;
 }
 
 message EnrollRequest {

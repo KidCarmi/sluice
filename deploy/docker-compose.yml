@@ -1,3 +1,7 @@
+# Development compose — testing UI enabled, ports exposed on all interfaces
+# so you can reach the GUI from your LAN while iterating. Build from source.
+#
+# For production use deploy/docker-compose.prod.yml instead.
 services:
   sluice:
     build:
@@ -6,15 +10,16 @@ services:
     container_name: sluice
     restart: unless-stopped
     ports:
-      - "8080:8080"   # Web GUI
-      - "8443:8443"   # gRPC
+      - "8443:8443"   # mTLS gRPC
+      - "8080:8080"   # Testing UI (HTTPS + bearer auth, see docker logs)
       - "9090:9090"   # Prometheus metrics
     volumes:
       - sluice-data:/data
+      - ./config.dev.yaml:/config.yaml:ro
     environment:
       - TZ=UTC
     healthcheck:
-      test: ["CMD", "/sluice", "--health"]
+      test: ["CMD", "/sluice", "health"]
       interval: 30s
       timeout: 5s
       retries: 3

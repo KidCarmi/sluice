@@ -24,6 +24,8 @@ type Config struct {
 	Logging      LoggingConfig      `yaml:"logging"`
 	Metrics      MetricsConfig      `yaml:"metrics"`
 	Enrollment   EnrollmentConfig   `yaml:"enrollment"`
+	TestingUI    TestingUIConfig    `yaml:"testing_ui"`
+	CLI          CLIConfig          `yaml:"cli"`
 }
 
 // ServerConfig holds the listener addresses and TLS material.
@@ -91,8 +93,35 @@ type MetricsConfig struct {
 
 // EnrollmentConfig controls the enrollment subsystem.
 type EnrollmentConfig struct {
-	Enabled   bool   `yaml:"enabled"`
-	TokenFile string `yaml:"token_file"`
+	Enabled   bool          `yaml:"enabled"`
+	TokenFile string        `yaml:"token_file"`
+	TokenTTL  time.Duration `yaml:"token_ttl"` // default 24h if zero
+}
+
+// TestingUIConfig controls the browser-based testing UI. OFF by default in
+// production. Must stay bound to localhost, require auth, and rate-limit.
+type TestingUIConfig struct {
+	// Enabled gates the entire UI. Default: false.
+	Enabled bool `yaml:"enabled"`
+	// Addr is the listener address. Default: 127.0.0.1:8080 (never 0.0.0.0).
+	Addr string `yaml:"addr"`
+	// RequireAuth forces bearer-token authentication.
+	RequireAuth bool `yaml:"require_auth"`
+	// AuthTokenFile stores the bearer token. Auto-generated on first boot.
+	AuthTokenFile string `yaml:"auth_token_file"`
+	// MaxUploadsPerHour per source IP.
+	MaxUploadsPerHour int `yaml:"max_uploads_per_hour"`
+	// MaxFileSize applies only to the testing UI (separate from engine cap).
+	MaxFileSize int64 `yaml:"max_file_size"`
+	// UseTLS makes the testing UI HTTPS using the server cert. Default: true.
+	UseTLS bool `yaml:"use_tls"`
+}
+
+// CLIConfig controls the local CLI unix-socket transport.
+type CLIConfig struct {
+	// SocketPath is the unix socket local CLI operators connect to.
+	// Default: /data/sluice.sock. 0600, owner-only.
+	SocketPath string `yaml:"socket_path"`
 }
 
 // Default returns a Config populated with sane defaults.
@@ -138,6 +167,19 @@ func Default() *Config {
 		Enrollment: EnrollmentConfig{
 			Enabled:   true,
 			TokenFile: "/data/enrollment_token",
+			TokenTTL:  24 * time.Hour,
+		},
+		TestingUI: TestingUIConfig{ // #nosec G101 -- this is a default config block, AuthTokenFile is a path not a credential
+			Enabled:           false, // OFF by default — prod hardening
+			Addr:              "127.0.0.1:8080",
+			RequireAuth:       true,
+			AuthTokenFile:     "/data/ui_token", // #nosec G101 -- path, not a secret
+			MaxUploadsPerHour: 20,
+			MaxFileSize:       10 << 20, // 10 MB for testing UI
+			UseTLS:            true,
+		},
+		CLI: CLIConfig{
+			SocketPath: "/data/sluice.sock",
 		},
 	}
 }

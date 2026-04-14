@@ -1,0 +1,34 @@
+services:
+  sluice:
+    image: ghcr.io/kidcarmi/sluice:latest
+    container_name: culvert-sluice
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      # mTLS gRPC — bound to localhost so only Culvert (same host) reaches it.
+      - "127.0.0.1:8443:8443"
+      # Prometheus scrape — also localhost-only; remote via Culvert.
+      - "127.0.0.1:9190:9090"
+    volumes:
+      - sluice-data:/data
+    environment:
+      - TZ=UTC
+      # Override config values inline if you want — default config.yaml
+      # baked into the image already has testing_ui.enabled=false.
+    healthcheck:
+      test: ["CMD", "/sluice", "health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    # No HTTP port (:8080) is published — the testing UI is disabled in
+    # this overlay. All admin access goes through `docker exec ... sluice <cmd>`
+    # or the mTLS gRPC port.
+
+volumes:
+  sluice-data:

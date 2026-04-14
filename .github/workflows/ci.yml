@@ -31,7 +31,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: "1.25"
+          go-version: "1.25.9"
 
       # -----------------------------------------------------------------------
       # 3. Static analysis with go vet
@@ -58,8 +58,8 @@ jobs:
       # -----------------------------------------------------------------------
       - name: Run tests (coverage)
         run: |
-          # Only measure coverage for packages with test files (skip cmd/).
-          go test -coverprofile=coverage.out $(go list ./... | grep -v /cmd/)
+          # Skip cmd/ (entrypoint, no tests) and proto/ (generated code, no tests).
+          go test -coverprofile=coverage.out $(go list ./... | grep -vE '/cmd/|/proto/')
 
           # Extract the total coverage percentage and enforce the threshold.
           COVERAGE=$(go tool cover -func=coverage.out | grep '^total:' | awk '{print $3}' | tr -d '%')

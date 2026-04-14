@@ -3,23 +3,98 @@ package server
 import (
 	"archive/zip"
 	"bytes"
-	"encoding/base64"
-	"encoding/json"
-	"fmt"
+	"context"
+	"crypto/sha256"
+	"io"
 	"log/slog"
 	"net"
-	"strings"
 	"testing"
 	"time"
 
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
+	"google.golang.org/grpc/test/bufconn"
+
+	"github.com/KidCarmi/Sluice/internal/auth"
 	"github.com/KidCarmi/Sluice/internal/sanitizer"
+	"github.com/KidCarmi/Sluice/internal/worker"
+	pb "github.com/KidCarmi/Sluice/proto/sluicev1"
 )
 
-// makeTestZIP builds a minimal ZIP archive in memory from the given entries.
-func makeTestZIP(entries map[string]string) []byte {
+// newTestServer wires up a server backed by an in-process bufconn listener.
+// Returns a client and a teardown function.
+func newTestServer(t *testing.T) (pb.SluiceServiceClient, *Server, func()) {
+	t.Helper()
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	dispatcher := sanitizer.NewDispatcher()
+	dispatcher.Register(sanitizer.NewOfficeSanitizer(logger))
+	dispatcher.Register(sanitizer.NewPDFSanitizer(logger))
+	dispatcher.Register(sanitizer.NewImageSanitizer(logger))
+	dispatcher.Register(sanitizer.NewSVGSanitizer(logger))
+	dispatcher.Register(sanitizer.NewArchiveSanitizer(dispatcher, logger))
+
+	pool := worker.NewPool(worker.PoolConfig{
+		MaxWorkers: 4,
+		QueueDepth: 8,
+		JobTimeout: 10 * time.Second,
+	}, func(ctx context.Context, job worker.Job) (interface{}, error) {
+		return dispatcher.Dispatch(ctx, job.Data, job.Filename)
+	})
+
+	enroller, err := auth.NewEnrollmentManager(nil, nil, logger)
+	if err != nil {
+		t.Fatalf("enroller: %v", err)
+	}
+
+	srv := New(dispatcher, pool, enroller, logger, "test", 50*1024*1024, "127.0.0.1:8443")
+
+	lis := bufconn.Listen(1024 * 1024)
+	grpcSrv := grpc.NewServer()
+	pb.RegisterSluiceServiceServer(grpcSrv, srv)
+
+	go func() {
+		_ = grpcSrv.Serve(lis)
+	}()
+
+	conn, err := grpc.NewClient("passthrough:///bufnet",
+		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
+			return lis.DialContext(ctx)
+		}),
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	)
+	if err != nil {
+		t.Fatalf("grpc client: %v", err)
+	}
+
+	client := pb.NewSluiceServiceClient(conn)
+	teardown := func() {
+		_ = conn.Close()
+		grpcSrv.Stop()
+		pool.Stop()
+	}
+	return client, srv, teardown
+}
+
+// makeCleanPDF returns a tiny but syntactically valid PDF with no threats.
+func makeCleanPDF() []byte {
+	return []byte("%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\nxref\n0 1\ntrailer\n<< /Root 1 0 R >>\nstartxref\n0\n%%EOF")
+}
+
+// makeDocxWithMacro returns a minimal OOXML DOCX containing a macro entry.
+func makeDocxWithMacro() []byte {
 	var buf bytes.Buffer
 	w := zip.NewWriter(&buf)
-	for name, content := range entries {
+	files := map[string]string{
+		"[Content_Types].xml":  `<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/></Types>`,
+		"_rels/.rels":          `<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>`,
+		"word/document.xml":    `<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Hi</w:t></w:r></w:p></w:body></w:document>`,
+		"word/vbaProject.bin":  "FAKE_MACRO",
+	}
+	for name, content := range files {
 		f, _ := w.Create(name)
 		_, _ = f.Write([]byte(content))
 	}
@@ -27,427 +102,386 @@ func makeTestZIP(entries map[string]string) []byte {
 	return buf.Bytes()
 }
 
-// minimalDOCX returns entries for a minimal valid DOCX (no threats).
-func minimalDOCX() map[string]string {
-	return map[string]string{
-		"[Content_Types].xml": `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
-  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
-  <Default Extension="xml" ContentType="application/xml"/>
-</Types>`,
-		"_rels/.rels": `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
-</Relationships>`,
-		"word/document.xml": `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
-  <w:body><w:p><w:r><w:t>Hello</w:t></w:r></w:p></w:body>
-</w:document>`,
-	}
-}
-
-func testLogger() *slog.Logger {
-	return slog.New(slog.NewTextHandler(&bytes.Buffer{}, &slog.HandlerOptions{Level: slog.LevelDebug}))
-}
-
-// newTestServer creates a dispatcher with the office sanitizer registered,
-// starts a Server on a random port, and returns the server together with its
-// address. The caller must call srv.Stop() when done.
-func newTestServer(t *testing.T, maxFileSize int64) (*Server, string) {
+// streamUpload is a small helper that sends a header + chunks and returns the
+// final result plus concatenated output bytes.
+func streamUpload(t *testing.T, client pb.SluiceServiceClient, hdr *pb.SanitizeHeader, data []byte) (*pb.SanitizeResult, []byte, error) {
 	t.Helper()
-	logger := testLogger()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 
-	d := sanitizer.NewDispatcher()
-	d.Register(sanitizer.NewOfficeSanitizer(logger))
-	d.Register(sanitizer.NewPDFSanitizer(logger))
-
-	srv := NewServer(d, logger, maxFileSize)
-
-	// Use port 0 so the OS assigns a free port.
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	stream, err := client.Sanitize(ctx)
 	if err != nil {
-		t.Fatalf("listen: %v", err)
+		return nil, nil, err
 	}
-	addr := ln.Addr().String()
-	// We need to close this listener because ListenAndServe creates its own.
-	_ = ln.Close()
+	if err := stream.Send(&pb.SanitizeRequest{Payload: &pb.SanitizeRequest_Header{Header: hdr}}); err != nil {
+		return nil, nil, err
+	}
 
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- srv.ListenAndServe(addr)
-	}()
-
-	// Give the server a moment to start accepting connections.
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		conn, err := net.DialTimeout("tcp", addr, 50*time.Millisecond)
-		if err == nil {
-			_ = conn.Close()
-			return srv, addr
+	// Send in 32 KB pieces to exercise streaming.
+	const piece = 32 * 1024
+	for off := 0; off < len(data); off += piece {
+		end := off + piece
+		if end > len(data) {
+			end = len(data)
 		}
-		time.Sleep(10 * time.Millisecond)
+		if err := stream.Send(&pb.SanitizeRequest{Payload: &pb.SanitizeRequest_Chunk{Chunk: data[off:end]}}); err != nil {
+			return nil, nil, err
+		}
 	}
-	t.Fatalf("server did not start accepting connections on %s", addr)
-	return nil, ""
-}
+	if err := stream.CloseSend(); err != nil {
+		return nil, nil, err
+	}
 
-// sendRequest dials addr, writes a JSON-line request, reads the JSON-line
-// response and returns it decoded.
-func sendRequest(t *testing.T, addr string, req SanitizeRequestJSON) SanitizeResponseJSON {
-	t.Helper()
-	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
+	// Result must be first message.
+	first, err := stream.Recv()
 	if err != nil {
-		t.Fatalf("dial: %v", err)
+		return nil, nil, err
 	}
-	defer func() { _ = conn.Close() }()
-
-	// Set a deadline so the test does not hang forever.
-	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
-
-	data, err := json.Marshal(req)
-	if err != nil {
-		t.Fatalf("marshal request: %v", err)
-	}
-	data = append(data, '\n')
-	if _, err := conn.Write(data); err != nil {
-		t.Fatalf("write: %v", err)
+	result := first.GetResult()
+	if result == nil {
+		t.Fatalf("expected Result as first message, got %T", first.GetPayload())
 	}
 
-	// Read response line.
-	var buf bytes.Buffer
-	tmp := make([]byte, 4096)
+	var out bytes.Buffer
 	for {
-		n, err := conn.Read(tmp)
-		if n > 0 {
-			buf.Write(tmp[:n])
-			if bytes.Contains(buf.Bytes(), []byte("\n")) {
-				break
-			}
-		}
-		if err != nil {
+		msg, err := stream.Recv()
+		if err == io.EOF {
 			break
 		}
-	}
-
-	var resp SanitizeResponseJSON
-	if err := json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &resp); err != nil {
-		t.Fatalf("unmarshal response: %v (raw: %q)", err, buf.String())
-	}
-	return resp
-}
-
-func TestServerSanitize(t *testing.T) {
-	srv, addr := newTestServer(t, 10*1024*1024)
-	defer func() { _ = srv.Stop() }()
-
-	docxData := makeTestZIP(minimalDOCX())
-	req := SanitizeRequestJSON{
-		Filename:    "clean.docx",
-		ContentType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-		RequestID:   "test-clean-001",
-		Data:        base64.StdEncoding.EncodeToString(docxData),
-	}
-
-	resp := sendRequest(t, addr, req)
-
-	if resp.Status != "clean" {
-		t.Errorf("expected status 'clean', got %q", resp.Status)
-	}
-	if resp.OriginalType != "docx" {
-		t.Errorf("expected original_type 'docx', got %q", resp.OriginalType)
-	}
-	if resp.OriginalSize != int64(len(docxData)) {
-		t.Errorf("expected original_size %d, got %d", len(docxData), resp.OriginalSize)
-	}
-	if len(resp.Threats) != 0 {
-		t.Errorf("expected 0 threats, got %d", len(resp.Threats))
-	}
-	if resp.Data == "" {
-		t.Error("expected non-empty sanitized data in response")
-	}
-	if resp.ErrorMessage != "" {
-		t.Errorf("expected no error, got %q", resp.ErrorMessage)
-	}
-
-	// Decode the returned data and verify it is a valid ZIP.
-	decoded, err := base64.StdEncoding.DecodeString(resp.Data)
-	if err != nil {
-		t.Fatalf("decode response data: %v", err)
-	}
-	if _, err := zip.NewReader(bytes.NewReader(decoded), int64(len(decoded))); err != nil {
-		t.Fatalf("response data is not a valid ZIP: %v", err)
-	}
-}
-
-func TestServerSanitizeWithThreats(t *testing.T) {
-	srv, addr := newTestServer(t, 10*1024*1024)
-	defer func() { _ = srv.Stop() }()
-
-	entries := minimalDOCX()
-	entries["word/vbaProject.bin"] = "VBA_MACRO_BINARY_DATA"
-	docxData := makeTestZIP(entries)
-
-	req := SanitizeRequestJSON{
-		Filename:    "macro.docx",
-		ContentType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-		RequestID:   "test-macro-001",
-		Data:        base64.StdEncoding.EncodeToString(docxData),
-	}
-
-	resp := sendRequest(t, addr, req)
-
-	if resp.Status != "sanitized" {
-		t.Errorf("expected status 'sanitized', got %q", resp.Status)
-	}
-	if resp.OriginalType != "docx" {
-		t.Errorf("expected original_type 'docx', got %q", resp.OriginalType)
-	}
-	if len(resp.Threats) == 0 {
-		t.Fatal("expected at least 1 threat, got 0")
-	}
-
-	foundMacro := false
-	for _, th := range resp.Threats {
-		if th.Type == "macro" {
-			foundMacro = true
-			if th.Severity != "critical" {
-				t.Errorf("expected macro severity 'critical', got %q", th.Severity)
-			}
-		}
-	}
-	if !foundMacro {
-		t.Error("expected a 'macro' threat but none found")
-	}
-
-	if resp.Data == "" {
-		t.Error("expected sanitized data in response")
-	}
-
-	// Verify that the sanitized archive no longer contains the macro.
-	decoded, err := base64.StdEncoding.DecodeString(resp.Data)
-	if err != nil {
-		t.Fatalf("decode response data: %v", err)
-	}
-	zr, err := zip.NewReader(bytes.NewReader(decoded), int64(len(decoded)))
-	if err != nil {
-		t.Fatalf("read sanitized ZIP: %v", err)
-	}
-	for _, f := range zr.File {
-		if f.Name == "word/vbaProject.bin" {
-			t.Error("vbaProject.bin should have been stripped from sanitized output")
-		}
-	}
-}
-
-func TestServerHealth(t *testing.T) {
-	// Health endpoint is not yet implemented in the TCP server.
-	// This test is a placeholder that will be enabled once the health RPC
-	// is added (planned for the gRPC migration).
-	t.Skip("health check not yet implemented in JSON-over-TCP server")
-}
-
-func TestServerOversizeFile(t *testing.T) {
-	maxSize := int64(1024) // 1 KB limit
-	srv, addr := newTestServer(t, maxSize)
-	defer func() { _ = srv.Stop() }()
-
-	// Create a file larger than the max.
-	bigData := bytes.Repeat([]byte("A"), int(maxSize)+1)
-	req := SanitizeRequestJSON{
-		Filename:  "big.docx",
-		RequestID: "test-oversize-001",
-		Data:      base64.StdEncoding.EncodeToString(bigData),
-	}
-
-	resp := sendRequest(t, addr, req)
-
-	if resp.Status != "error" {
-		t.Errorf("expected status 'error', got %q", resp.Status)
-	}
-	if resp.ErrorMessage == "" {
-		t.Error("expected non-empty error message for oversize file")
-	}
-	if !strings.Contains(resp.ErrorMessage, "exceeds maximum") {
-		t.Errorf("expected error message to mention 'exceeds maximum', got %q", resp.ErrorMessage)
-	}
-}
-
-func TestServerInvalidJSON(t *testing.T) {
-	srv, addr := newTestServer(t, 10*1024*1024)
-	defer func() { _ = srv.Stop() }()
-
-	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
-	defer func() { _ = conn.Close() }()
-
-	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
-
-	// Send garbage followed by a newline.
-	garbage := []byte("this is not valid json at all!!!\n")
-	if _, err := conn.Write(garbage); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-
-	// Read the response — server should return a JSON error, not crash.
-	var buf bytes.Buffer
-	tmp := make([]byte, 4096)
-	for {
-		n, err := conn.Read(tmp)
-		if n > 0 {
-			buf.Write(tmp[:n])
-			if bytes.Contains(buf.Bytes(), []byte("\n")) {
-				break
-			}
-		}
 		if err != nil {
-			break
+			return result, out.Bytes(), err
+		}
+		if r := msg.GetResult(); r != nil {
+			t.Fatalf("unexpected Result after chunks started")
+		}
+		if c := msg.GetChunk(); c != nil {
+			out.Write(c)
 		}
 	}
+	return result, out.Bytes(), nil
+}
 
-	var resp SanitizeResponseJSON
-	if err := json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &resp); err != nil {
-		t.Fatalf("expected valid JSON error response, got unmarshal error: %v (raw: %q)", err, buf.String())
-	}
+func TestSanitize_CleanPDF_Streaming(t *testing.T) {
+	client, _, done := newTestServer(t)
+	defer done()
 
-	if resp.Status != "error" {
-		t.Errorf("expected status 'error', got %q", resp.Status)
+	data := makeCleanPDF()
+	hdr := &pb.SanitizeHeader{
+		Filename:      "clean.pdf",
+		ContentType:   "application/pdf",
+		ContentLength: int64(len(data)),
+		RequestId:     "test-1",
+		Mode:          pb.Mode_ENFORCE,
 	}
-	if resp.ErrorMessage == "" {
-		t.Error("expected non-empty error message for invalid JSON")
+	result, out, err := streamUpload(t, client, hdr, data)
+	if err != nil {
+		t.Fatalf("stream: %v", err)
 	}
-	if !strings.Contains(resp.ErrorMessage, "invalid JSON") {
-		t.Errorf("expected error message to mention 'invalid JSON', got %q", resp.ErrorMessage)
+	if result.Status != pb.Status_CLEAN {
+		t.Errorf("expected CLEAN, got %v", result.Status)
+	}
+	if !bytes.Equal(out, data) {
+		t.Errorf("expected clean bytes echoed, got len=%d", len(out))
+	}
+	sum := sha256.Sum256(data)
+	if !bytes.Equal(result.SanitizedSha256, sum[:]) {
+		t.Errorf("sanitized_sha256 mismatch")
+	}
+	if result.DurationMs < 0 {
+		t.Errorf("duration_ms must be >= 0, got %d", result.DurationMs)
 	}
 }
 
-func TestServerGracefulShutdown(t *testing.T) {
-	srv, addr := newTestServer(t, 10*1024*1024)
+func TestSanitize_DocxWithMacro_Sanitized(t *testing.T) {
+	client, _, done := newTestServer(t)
+	defer done()
 
-	// Verify the server is accepting connections.
-	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
+	data := makeDocxWithMacro()
+	hdr := &pb.SanitizeHeader{
+		Filename:      "macro.docx",
+		ContentLength: int64(len(data)),
+		RequestId:     "test-2",
+		Mode:          pb.Mode_ENFORCE,
+	}
+	result, out, err := streamUpload(t, client, hdr, data)
 	if err != nil {
-		t.Fatalf("dial before shutdown: %v", err)
+		t.Fatalf("stream: %v", err)
 	}
-	_ = conn.Close()
+	if result.Status != pb.Status_SANITIZED {
+		t.Errorf("expected SANITIZED, got %v", result.Status)
+	}
+	if len(result.ThreatsRemoved) == 0 {
+		t.Errorf("expected threats, got 0")
+	}
+	// Verify every severity is in the allowed set.
+	for _, th := range result.ThreatsRemoved {
+		switch th.Severity {
+		case "low", "medium", "high", "critical":
+		default:
+			t.Errorf("severity %q not in {low,medium,high,critical}", th.Severity)
+		}
+	}
+	// Output should differ from input (macro was stripped).
+	if bytes.Equal(out, data) {
+		t.Errorf("expected sanitized bytes to differ from original")
+	}
+}
 
-	// Stop the server.
-	if err := srv.Stop(); err != nil {
-		t.Fatalf("stop: %v", err)
+func TestSanitize_ReportOnly_ReturnsOriginalBytes(t *testing.T) {
+	client, _, done := newTestServer(t)
+	defer done()
+
+	data := makeDocxWithMacro()
+	hdr := &pb.SanitizeHeader{
+		Filename:      "macro.docx",
+		ContentLength: int64(len(data)),
+		RequestId:     "test-3",
+		Mode:          pb.Mode_REPORT_ONLY,
+	}
+	result, out, err := streamUpload(t, client, hdr, data)
+	if err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	if len(result.ThreatsRemoved) == 0 {
+		t.Errorf("expected threats detected, got 0")
+	}
+	if !bytes.Equal(out, data) {
+		t.Errorf("REPORT_ONLY MUST return original bytes unchanged")
+	}
+	if result.OriginalSize != result.SanitizedSize {
+		t.Errorf("REPORT_ONLY: original_size=%d sanitized_size=%d should match",
+			result.OriginalSize, result.SanitizedSize)
+	}
+	sum := sha256.Sum256(data)
+	if !bytes.Equal(result.SanitizedSha256, sum[:]) {
+		t.Errorf("REPORT_ONLY: sanitized_sha256 must match original data hash")
+	}
+}
+
+func TestSanitize_BypassWithReport_SameAsReportOnly(t *testing.T) {
+	client, _, done := newTestServer(t)
+	defer done()
+
+	data := makeDocxWithMacro()
+	hdr := &pb.SanitizeHeader{
+		Filename:      "macro.docx",
+		ContentLength: int64(len(data)),
+		RequestId:     "test-4",
+		Mode:          pb.Mode_BYPASS_WITH_REPORT,
+	}
+	_, out, err := streamUpload(t, client, hdr, data)
+	if err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	if !bytes.Equal(out, data) {
+		t.Errorf("BYPASS_WITH_REPORT must return original bytes unchanged")
+	}
+}
+
+func TestSanitize_UnknownProfile_ReturnsError(t *testing.T) {
+	client, _, done := newTestServer(t)
+	defer done()
+
+	data := makeCleanPDF()
+	hdr := &pb.SanitizeHeader{
+		Filename:      "x.pdf",
+		ContentLength: int64(len(data)),
+		ProfileName:   "nonexistent",
+		Mode:          pb.Mode_ENFORCE,
+	}
+	// Send only header — we expect an early-reject result.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	stream, err := client.Sanitize(ctx)
+	if err != nil {
+		t.Fatalf("open stream: %v", err)
+	}
+	if err := stream.Send(&pb.SanitizeRequest{Payload: &pb.SanitizeRequest_Header{Header: hdr}}); err != nil {
+		t.Fatalf("send header: %v", err)
+	}
+	if err := stream.CloseSend(); err != nil {
+		t.Fatalf("close send: %v", err)
 	}
 
-	// After stop, new connections should be refused.
-	_, err = net.DialTimeout("tcp", addr, 500*time.Millisecond)
+	msg, err := stream.Recv()
+	if err != nil {
+		t.Fatalf("recv: %v", err)
+	}
+	result := msg.GetResult()
+	if result == nil {
+		t.Fatal("expected Result as first message")
+	}
+	if result.Status != pb.Status_ERROR {
+		t.Errorf("expected ERROR, got %v", result.Status)
+	}
+	if result.ErrorMessage == "" || !bytes.Contains([]byte(result.ErrorMessage), []byte("unknown_profile")) {
+		t.Errorf("expected error_message prefixed with unknown_profile:, got %q", result.ErrorMessage)
+	}
+}
+
+func TestSanitize_EmptyProfile_TreatedAsDefault(t *testing.T) {
+	client, _, done := newTestServer(t)
+	defer done()
+
+	data := makeCleanPDF()
+	hdr := &pb.SanitizeHeader{
+		Filename:      "x.pdf",
+		ContentLength: int64(len(data)),
+		ProfileName:   "", // empty -> default
+		Mode:          pb.Mode_ENFORCE,
+	}
+	result, _, err := streamUpload(t, client, hdr, data)
+	if err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	if result.Status == pb.Status_ERROR {
+		t.Errorf("empty profile_name should be treated as 'default', got error: %s", result.ErrorMessage)
+	}
+}
+
+func TestSanitize_ContentLengthExceeds_InvalidArgument(t *testing.T) {
+	client, _, done := newTestServer(t)
+	defer done()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	stream, err := client.Sanitize(ctx)
+	if err != nil {
+		t.Fatalf("open stream: %v", err)
+	}
+	hdr := &pb.SanitizeHeader{
+		Filename:      "huge.bin",
+		ContentLength: 100 * 1024 * 1024, // 100MB > 50MB cap
+		RequestId:     "test-huge",
+	}
+	if err := stream.Send(&pb.SanitizeRequest{Payload: &pb.SanitizeRequest_Header{Header: hdr}}); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	_, err = stream.Recv()
 	if err == nil {
-		t.Error("expected connection to be refused after shutdown")
+		t.Fatal("expected error for oversize file")
+	}
+	st, _ := status.FromError(err)
+	if st.Code() != codes.InvalidArgument {
+		t.Errorf("expected InvalidArgument (NOT ResourceExhausted), got %v", st.Code())
+	}
+	if !bytes.Contains([]byte(st.Message()), []byte("file_too_large:")) {
+		t.Errorf("expected message to start with 'file_too_large:', got %q", st.Message())
 	}
 }
 
-func TestServerUnsupportedFileType(t *testing.T) {
-	srv, addr := newTestServer(t, 10*1024*1024)
-	defer func() { _ = srv.Stop() }()
+func TestHealth_IncludesDefaultProfile(t *testing.T) {
+	client, _, done := newTestServer(t)
+	defer done()
 
-	req := SanitizeRequestJSON{
-		Filename:  "image.bmp",
-		RequestID: "test-unsupported-001",
-		Data:      base64.StdEncoding.EncodeToString([]byte("BM\x00\x00\x00")),
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	resp, err := client.Health(ctx, &pb.HealthRequest{})
+	if err != nil {
+		t.Fatalf("health: %v", err)
 	}
-
-	resp := sendRequest(t, addr, req)
-
-	if resp.Status != "unsupported" {
-		t.Errorf("expected status 'unsupported', got %q", resp.Status)
+	if !resp.Healthy {
+		t.Errorf("expected healthy=true")
 	}
-	if resp.ErrorMessage == "" {
-		t.Error("expected non-empty error message for unsupported type")
+	if len(resp.Profiles) != 1 {
+		t.Fatalf("expected exactly 1 profile, got %d", len(resp.Profiles))
 	}
-}
-
-func TestServerBadBase64(t *testing.T) {
-	srv, addr := newTestServer(t, 10*1024*1024)
-	defer func() { _ = srv.Stop() }()
-
-	req := SanitizeRequestJSON{
-		Filename:  "test.docx",
-		RequestID: "test-badbase64-001",
-		Data:      "not!valid!base64!!!",
+	if resp.Profiles[0].Name != "default" {
+		t.Errorf("expected default profile, got %q", resp.Profiles[0].Name)
 	}
-
-	resp := sendRequest(t, addr, req)
-
-	if resp.Status != "error" {
-		t.Errorf("expected status 'error', got %q", resp.Status)
-	}
-	if !strings.Contains(resp.ErrorMessage, "base64") {
-		t.Errorf("expected error about base64, got %q", resp.ErrorMessage)
+	if len(resp.Profiles[0].Capabilities) == 0 {
+		t.Errorf("default profile must advertise capabilities")
 	}
 }
 
-func TestServerConcurrentRequests(t *testing.T) {
-	srv, addr := newTestServer(t, 10*1024*1024)
-	defer func() { _ = srv.Stop() }()
+func TestEnroll_HappyPath(t *testing.T) {
+	client, srv, done := newTestServer(t)
+	defer done()
 
-	docxData := makeTestZIP(minimalDOCX())
-	encoded := base64.StdEncoding.EncodeToString(docxData)
-
-	const numClients = 5
-	errCh := make(chan error, numClients)
-
-	for i := 0; i < numClients; i++ {
-		go func(id int) {
-			req := SanitizeRequestJSON{
-				Filename:  "concurrent.docx",
-				RequestID: fmt.Sprintf("concurrent-%d", id),
-				Data:      encoded,
-			}
-
-			conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
-			if err != nil {
-				errCh <- fmt.Errorf("client %d dial: %w", id, err)
-				return
-			}
-			defer func() { _ = conn.Close() }()
-			_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
-
-			data, _ := json.Marshal(req)
-			data = append(data, '\n')
-			if _, err := conn.Write(data); err != nil {
-				errCh <- fmt.Errorf("client %d write: %w", id, err)
-				return
-			}
-
-			var buf bytes.Buffer
-			tmp := make([]byte, 4096)
-			for {
-				n, readErr := conn.Read(tmp)
-				if n > 0 {
-					buf.Write(tmp[:n])
-					if bytes.Contains(buf.Bytes(), []byte("\n")) {
-						break
-					}
-				}
-				if readErr != nil {
-					break
-				}
-			}
-
-			var resp SanitizeResponseJSON
-			if err := json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &resp); err != nil {
-				errCh <- fmt.Errorf("client %d unmarshal: %w (raw: %q)", id, err, buf.String())
-				return
-			}
-			if resp.Status != "clean" {
-				errCh <- fmt.Errorf("client %d: expected status 'clean', got %q", id, resp.Status)
-				return
-			}
-			errCh <- nil
-		}(i)
+	token, err := srv.enroller.GenerateToken()
+	if err != nil {
+		t.Fatalf("gen token: %v", err)
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	resp, err := client.Enroll(ctx, &pb.EnrollRequest{Token: token})
+	if err != nil {
+		t.Fatalf("enroll: %v", err)
+	}
+	if len(resp.CaCert) == 0 || len(resp.ClientCert) == 0 || len(resp.ClientKey) == 0 {
+		t.Fatalf("enroll response missing material")
+	}
+}
 
-	for i := 0; i < numClients; i++ {
-		if err := <-errCh; err != nil {
-			t.Error(err)
+func TestEnroll_ConsumedToken_Fails(t *testing.T) {
+	client, srv, done := newTestServer(t)
+	defer done()
+
+	token, _ := srv.enroller.GenerateToken()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := client.Enroll(ctx, &pb.EnrollRequest{Token: token}); err != nil {
+		t.Fatalf("first enroll: %v", err)
+	}
+	_, err := client.Enroll(ctx, &pb.EnrollRequest{Token: token})
+	if err == nil {
+		t.Fatal("expected error on reused token")
+	}
+	st, _ := status.FromError(err)
+	if st.Code() != codes.PermissionDenied {
+		t.Errorf("expected PermissionDenied, got %v", st.Code())
+	}
+}
+
+func TestEnroll_EmptyToken_Rejected(t *testing.T) {
+	client, _, done := newTestServer(t)
+	defer done()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err := client.Enroll(ctx, &pb.EnrollRequest{Token: ""})
+	if err == nil {
+		t.Fatal("expected error for empty token")
+	}
+	st, _ := status.FromError(err)
+	if st.Code() != codes.InvalidArgument {
+		t.Errorf("expected InvalidArgument, got %v", st.Code())
+	}
+}
+
+func TestSanitize_ResultIsFirstMessage(t *testing.T) {
+	// Wire contract: result is ALWAYS the first SanitizeResponse, before any chunks.
+	client, _, done := newTestServer(t)
+	defer done()
+
+	data := makeDocxWithMacro()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	stream, _ := client.Sanitize(ctx)
+	_ = stream.Send(&pb.SanitizeRequest{Payload: &pb.SanitizeRequest_Header{Header: &pb.SanitizeHeader{
+		Filename: "m.docx", ContentLength: int64(len(data)), Mode: pb.Mode_ENFORCE,
+	}}})
+	// send data in one chunk
+	_ = stream.Send(&pb.SanitizeRequest{Payload: &pb.SanitizeRequest_Chunk{Chunk: data}})
+	_ = stream.CloseSend()
+
+	first, err := stream.Recv()
+	if err != nil {
+		t.Fatalf("first recv: %v", err)
+	}
+	if first.GetResult() == nil {
+		t.Errorf("first message must be Result, got chunk")
+	}
+	// subsequent messages must all be chunks
+	for {
+		m, err := stream.Recv()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("recv: %v", err)
+		}
+		if m.GetResult() != nil {
+			t.Errorf("result appeared after first message — must be atomic")
 		}
 	}
 }

@@ -1,0 +1,42 @@
+server:
+  grpc_addr: ":8443"
+  http_addr: ":8080"          # Web GUI address
+  tls:
+    cert_file: /data/tls/server.pem
+    key_file: /data/tls/server-key.pem
+    ca_file: /data/tls/ca.pem
+
+workers:
+  max_concurrent: 10
+  queue_depth: 50
+  timeout: 30s
+
+limits:
+  max_file_size: 52428800       # 50 MB
+  max_decompressed_size: 104857600  # 100 MB
+
+sanitization:
+  office:
+    enabled: true
+    strip_macros: true
+    strip_ole_objects: true
+    strip_activex: true
+    strip_external_connections: true
+    re_encode_images: true
+  pdf:
+    enabled: true
+    strip_javascript: true
+    strip_launch_actions: true
+    strip_attachments: true
+    strip_xfa: true
+
+logging:
+  format: json
+  level: info
+
+metrics:
+  prometheus_addr: ":9090"
+
+enrollment:
+  enabled: true
+  token_file: /data/enrollment_token

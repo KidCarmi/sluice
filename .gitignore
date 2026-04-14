@@ -1,0 +1,40 @@
+# Binaries (root level only, don't ignore cmd/sluice/)
+/sluice
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test
+*.test
+coverage.out
+coverage.html
+
+# Build
+/dist/
+/bin/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets - NEVER commit these
+*.pem
+*.key
+*.crt
+*.p12
+.env
+enrollment_token
+
+# Vendor (if used)
+/vendor/
+
+# Debug
+__debug_bin*

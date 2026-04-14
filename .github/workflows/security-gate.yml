@@ -1,0 +1,72 @@
+# =============================================================================
+# Security Gate — SAST, vulnerability scanning, secret detection, license audit
+# Runs on every push and pull request targeting the main branch.
+# =============================================================================
+name: Security Gate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  security-events: write   # required for SARIF uploads (trivy, gosec)
+
+jobs:
+  security-checks:
+    name: Security Checks
+    runs-on: ubuntu-latest
+
+    steps:
+      # -----------------------------------------------------------------------
+      # 1. Checkout the repository
+      # -----------------------------------------------------------------------
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history needed by gitleaks
+
+      # -----------------------------------------------------------------------
+      # 2. Set up the Go toolchain
+      # -----------------------------------------------------------------------
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+
+      # -----------------------------------------------------------------------
+      # 3. Static Application Security Testing with gosec
+      # -----------------------------------------------------------------------
+      - name: Run gosec
+        uses: securego/gosec@master
+        with:
+          args: ./...
+
+      # -----------------------------------------------------------------------
+      # 4. Go vulnerability database check
+      # -----------------------------------------------------------------------
+      - name: Run govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+
+      # -----------------------------------------------------------------------
+      # 5. Secret detection with gitleaks
+      # -----------------------------------------------------------------------
+      - name: Run gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
+
+      # -----------------------------------------------------------------------
+      # 6. Filesystem vulnerability scan with Trivy
+      # -----------------------------------------------------------------------
+      - name: Run Trivy filesystem scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: fs
+          scan-ref: "."
+          severity: CRITICAL,HIGH
+          exit-code: "1"

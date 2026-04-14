@@ -272,9 +272,12 @@ func BootstrapServerCerts(certFile, keyFile, caFile string, hosts []string) (caC
 	if err != nil {
 		return nil, nil, fmt.Errorf("generating server cert: %w", err)
 	}
+	// #nosec G703 -- certFile/keyFile are already filepath.Clean'd above and
+	// come from admin-provided server config (not user input).
 	if err := os.WriteFile(certFile, serverCertPEM, 0o600); err != nil {
 		return nil, nil, fmt.Errorf("writing server cert: %w", err)
 	}
+	// #nosec G703 -- keyFile is already filepath.Clean'd above.
 	if err := os.WriteFile(keyFile, serverKeyPEM, 0o600); err != nil {
 		return nil, nil, fmt.Errorf("writing server key: %w", err)
 	}

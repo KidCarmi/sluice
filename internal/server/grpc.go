@@ -284,8 +284,8 @@ func (s *Server) Health(ctx context.Context, _ *pb.HealthRequest) (*pb.HealthRes
 		Healthy:        true,
 		Version:        s.version,
 		SupportedTypes: []string{"pdf", "docx", "xlsx", "pptx", "jpeg", "png", "gif", "svg", "zip"},
-		ActiveWorkers:  int32(s.pool.ActiveWorkers()),
-		QueueDepth:     int32(s.pool.QueueDepth()),
+		ActiveWorkers:  clampInt32(s.pool.ActiveWorkers()),
+		QueueDepth:     clampInt32(s.pool.QueueDepth()),
 		FilesProcessed: s.filesProcessed.Load(),
 		ThreatsRemoved: s.threatsRemoved.Load(),
 		Profiles: []*pb.Profile{
@@ -412,4 +412,19 @@ func minInt64(a, b int64) int64 {
 		return a
 	}
 	return b
+}
+
+// clampInt32 defensively truncates large counters before returning them in
+// protobuf int32 fields. Worker counts realistically stay in the thousands,
+// but gosec flags plain int → int32 casts (G115); this helper documents
+// intent.
+func clampInt32(v int) int32 {
+	if v < 0 {
+		return 0
+	}
+	const maxInt32 = int32(^uint32(0) >> 1)
+	if int64(v) > int64(maxInt32) {
+		return maxInt32
+	}
+	return int32(v) // #nosec G115 -- bounded above
 }

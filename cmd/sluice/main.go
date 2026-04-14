@@ -1,30 +1,70 @@
+// Sluice CDR Engine — entrypoint.
+//
+// Modes (selected via first positional argument):
+//
+//	sluice                     (daemon) run the gRPC server + optional testing UI
+//	sluice --health            one-shot liveness probe (prints "healthy" and exits)
+//	sluice token [rotate]      print current token + server fingerprint
+//	sluice fingerprint         print server cert SHA-256 fingerprint
+//	sluice health              local health check via CLI unix socket
+//	sluice version             print version + build info
 package main
 
 import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"crypto/tls"
+	"errors"
 	"flag"
 	"fmt"
 	"image"
 	"image/color"
 	"image/png"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/keepalive"
+	"google.golang.org/grpc/status"
+
+	"github.com/KidCarmi/Sluice/internal/auth"
 	"github.com/KidCarmi/Sluice/internal/config"
 	"github.com/KidCarmi/Sluice/internal/sanitizer"
+	"github.com/KidCarmi/Sluice/internal/server"
 	"github.com/KidCarmi/Sluice/internal/web"
 	"github.com/KidCarmi/Sluice/internal/worker"
+	pb "github.com/KidCarmi/Sluice/proto/sluicev1"
 )
 
 var version = "0.1.0"
 
 func main() {
+	// Subcommand dispatch happens before flag parsing so we can take
+	// positional arguments like `sluice token rotate`.
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "token":
+			os.Exit(runTokenCommand(os.Args[2:]))
+		case "fingerprint":
+			os.Exit(runFingerprintCommand())
+		case "health":
+			os.Exit(runHealthCommand())
+		case "version":
+			fmt.Printf("sluice %s\n", version)
+			os.Exit(0)
+		}
+	}
+
 	configPath := flag.String("config", "config.yaml", "path to config file")
 	healthCheck := flag.Bool("health", false, "run health check and exit")
 	flag.Parse()
@@ -34,46 +74,24 @@ func main() {
 		os.Exit(0)
 	}
 
-	// Load config
-	cfg, err := config.Load(*configPath)
-	if err != nil {
-		// Fall back to defaults if no config file exists
-		cfg = config.Default()
-		slog.Warn("using default config", "reason", err)
-	}
-
-	// Setup structured logging
-	var handler slog.Handler
-	if cfg.Logging.Format == "json" {
-		handler = slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: parseLogLevel(cfg.Logging.Level)})
-	} else {
-		handler = slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: parseLogLevel(cfg.Logging.Level)})
-	}
-	logger := slog.New(handler)
+	cfg := loadConfigOrDefault(*configPath)
+	logger := newLogger(cfg)
 	slog.SetDefault(logger)
 
 	logger.Info("starting sluice",
 		"version", version,
 		"grpc_addr", cfg.Server.GRPCAddr,
-		"http_addr", cfg.Server.HTTPAddr,
+		"testing_ui", cfg.TestingUI.Enabled,
 	)
 
-	// Create sanitizer dispatcher and register sanitizers
-	dispatcher := sanitizer.NewDispatcher()
-	dispatcher.Register(sanitizer.NewOfficeSanitizer(logger))
-	dispatcher.Register(sanitizer.NewPDFSanitizer(logger))
-	dispatcher.Register(sanitizer.NewImageSanitizer(logger))
-	dispatcher.Register(sanitizer.NewSVGSanitizer(logger))
-	dispatcher.Register(sanitizer.NewArchiveSanitizer(dispatcher, logger))
-
-	// Startup self-test: verify each sanitizer works
+	// Sanitizer dispatcher + worker pool
+	dispatcher := buildDispatcher(logger)
 	if err := selfTest(dispatcher, logger); err != nil {
 		logger.Error("startup self-test failed", "error", err)
 		os.Exit(1)
 	}
 	logger.Info("startup self-test passed")
 
-	// Create worker pool for bounded concurrency
 	pool := worker.NewPool(worker.PoolConfig{
 		MaxWorkers: cfg.Workers.MaxConcurrent,
 		QueueDepth: cfg.Workers.QueueDepth,
@@ -81,50 +99,320 @@ func main() {
 	}, func(ctx context.Context, job worker.Job) (interface{}, error) {
 		return dispatcher.Dispatch(ctx, job.Data, job.Filename)
 	})
-	// Create web handler
-	webHandler := web.NewHandler(dispatcher, pool, logger, cfg.Limits.MaxFileSize)
 
-	// Setup HTTP server with routes
-	mux := http.NewServeMux()
-	webHandler.RegisterRoutes(mux)
+	// Ensure /data dir exists so token / socket writes don't fail.
+	ensureDataDir(cfg, logger)
 
-	httpServer := &http.Server{
-		Addr:         cfg.Server.HTTPAddr,
-		Handler:      mux,
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 60 * time.Second,
-		IdleTimeout:  120 * time.Second,
+	// Bootstrap server cert + CA (idempotent).
+	caCertPEM, serverCertPEM, err := auth.BootstrapServerCerts(
+		cfg.Server.TLS.CertFile,
+		cfg.Server.TLS.KeyFile,
+		cfg.Server.TLS.CAFile,
+		tlsHosts(cfg),
+	)
+	if err != nil {
+		logger.Error("bootstrapping server certs", "error", err)
+		os.Exit(1)
+	}
+	caKeyPEM, err := auth.LoadCAKey(cfg.Server.TLS.CAFile)
+	if err != nil {
+		logger.Error("loading CA key", "error", err)
+		os.Exit(1)
+	}
+	fingerprint, err := auth.CertFingerprintSHA256(serverCertPEM)
+	if err != nil {
+		logger.Error("computing server cert fingerprint", "error", err)
+		os.Exit(1)
 	}
 
-	// Start HTTP server
+	// Enrollment manager with SHA-256 + TTL.
+	enroller, err := auth.NewEnrollmentManager(caCertPEM, caKeyPEM, logger)
+	if err != nil {
+		logger.Error("creating enrollment manager", "error", err)
+		os.Exit(1)
+	}
+	if ttl := cfg.Enrollment.TokenTTL; ttl > 0 {
+		enroller.SetTTL(ttl)
+	}
+
+	// First-boot enrollment token (only if token file is missing).
+	if cfg.Enrollment.Enabled {
+		ensureFirstBootToken(enroller, cfg, fingerprint, logger)
+	}
+
+	// Web handler (for the testing UI — guarded by cfg.TestingUI.Enabled)
+	webHandler := web.NewHandler(dispatcher, pool, logger, cfg.Limits.MaxFileSize)
+
+	// Build gRPC server with mTLS + interceptors.
+	tlsCfg, err := auth.LoadTLSConfigOptionalClient(
+		cfg.Server.TLS.CertFile,
+		cfg.Server.TLS.KeyFile,
+		cfg.Server.TLS.CAFile,
+	)
+	if err != nil {
+		logger.Error("loading TLS config", "error", err)
+		os.Exit(1)
+	}
+
+	grpcServer := grpc.NewServer(
+		grpc.Creds(credentials.NewTLS(tlsCfg)),
+		grpc.MaxRecvMsgSize(4<<20), // 4 MB per-message
+		grpc.MaxSendMsgSize(4<<20),
+		grpc.KeepaliveParams(keepalive.ServerParameters{
+			Time:    30 * time.Second,
+			Timeout: 10 * time.Second,
+		}),
+		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
+			MinTime:             10 * time.Second,
+			PermitWithoutStream: true,
+		}),
+		grpc.UnaryInterceptor(requireClientCertUnary),
+		grpc.StreamInterceptor(requireClientCertStream),
+	)
+
+	sluiceServer := server.New(dispatcher, pool, enroller, logger, version, cfg.Limits.MaxFileSize, cfg.Server.GRPCAddr)
+	pb.RegisterSluiceServiceServer(grpcServer, sluiceServer)
+
+	// Public mTLS listener.
+	grpcLis, err := net.Listen("tcp", cfg.Server.GRPCAddr)
+	if err != nil {
+		logger.Error("gRPC listen", "addr", cfg.Server.GRPCAddr, "error", err)
+		os.Exit(1)
+	}
 	go func() {
-		logger.Info("web GUI available", "addr", "http://localhost"+cfg.Server.HTTPAddr)
-		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			logger.Error("http server error", "error", err)
-			os.Exit(1)
+		logger.Info("gRPC server listening (mTLS)", "addr", cfg.Server.GRPCAddr)
+		if err := grpcServer.Serve(grpcLis); err != nil {
+			logger.Error("gRPC serve", "error", err)
 		}
 	}()
 
-	// Wait for shutdown signal
+	// Local CLI transport: same handlers, different listener (unix socket).
+	cliServer, cliLis, err := startCLIServer(cfg, sluiceServer, logger)
+	if err != nil {
+		logger.Warn("CLI socket disabled", "error", err)
+	}
+
+	// Optional testing UI (HTTPS + bearer auth + rate limit).
+	var httpServer *http.Server
+	if cfg.TestingUI.Enabled {
+		bannerTestingUI(cfg, logger)
+		httpServer = startTestingUI(cfg, webHandler, logger)
+	} else {
+		logger.Info("testing UI is disabled (production default)")
+	}
+
+	// Wait for shutdown signal.
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	sig := <-sigCh
 	logger.Info("shutting down", "signal", sig)
 
-	// Graceful shutdown
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
+	// Ordered shutdown: stop accepting, drain in-flight, then close transports.
 	webHandler.Stop()
-	pool.Stop() // drain in-flight jobs before closing HTTP
-	if err := httpServer.Shutdown(ctx); err != nil {
-		logger.Error("http shutdown error", "error", err)
+	pool.Stop()
+	shutdownGracefully(grpcServer, logger)
+	if cliServer != nil {
+		cliServer.Stop()
+	}
+	_ = cliLis // closed by cliServer.Stop
+	if httpServer != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := httpServer.Shutdown(ctx); err != nil {
+			logger.Error("http shutdown", "error", err)
+		}
 	}
 	logger.Info("shutdown complete")
 }
 
-// selfTest runs a minimal file through each registered sanitizer to verify
-// they work. Catches misconfigurations and broken sanitizers at deploy time
-// instead of on the first user request.
+// shutdownGracefully wraps grpc.Server.GracefulStop with a hard timeout.
+// Without the wrapper a stuck in-flight stream can hang forever.
+func shutdownGracefully(s *grpc.Server, logger *slog.Logger) {
+	done := make(chan struct{})
+	go func() {
+		s.GracefulStop()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(35 * time.Second):
+		logger.Warn("grpc GracefulStop timed out, forcing Stop")
+		s.Stop()
+	}
+}
+
+// requireClientCertUnary rejects unary RPCs (except Enroll) whose caller did
+// not present a verified client certificate.
+func requireClientCertUnary(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
+	if rpcAllowedWithoutClientCert(info.FullMethod) {
+		return handler(ctx, req)
+	}
+	if !hasVerifiedClientCert(ctx) {
+		return nil, status.Error(codes.Unauthenticated, "mTLS client certificate required")
+	}
+	return handler(ctx, req)
+}
+
+func requireClientCertStream(srv any, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
+	if rpcAllowedWithoutClientCert(info.FullMethod) {
+		return handler(srv, ss)
+	}
+	if !hasVerifiedClientCert(ss.Context()) {
+		return status.Error(codes.Unauthenticated, "mTLS client certificate required")
+	}
+	return handler(srv, ss)
+}
+
+// rpcAllowedWithoutClientCert is the explicit allow-list of RPCs that do not
+// require a verified client cert. Enroll is the only entry (chicken-and-egg).
+func rpcAllowedWithoutClientCert(method string) bool {
+	// method is like "/sluice.v1.SluiceService/Enroll"
+	return strings.HasSuffix(method, "/Enroll")
+}
+
+// hasVerifiedClientCert inspects the TLS peer info for a verified chain.
+func hasVerifiedClientCert(ctx context.Context) bool {
+	p, ok := peerFrom(ctx)
+	if !ok {
+		return false
+	}
+	ti, ok := p.AuthInfo.(credentials.TLSInfo)
+	if !ok {
+		return false
+	}
+	return len(ti.State.VerifiedChains) > 0
+}
+
+// ---- First-boot token + banner --------------------------------------------
+
+func ensureFirstBootToken(enroller *auth.EnrollmentManager, cfg *config.Config, fingerprint string, logger *slog.Logger) {
+	tokenPath := cfg.Enrollment.TokenFile
+	if _, err := os.Stat(tokenPath); err == nil {
+		// Token file already exists — do not re-log. Operator ran `sluice token` once.
+		return
+	}
+	token, err := enroller.GenerateToken()
+	if err != nil {
+		logger.Error("generating first-boot enrollment token", "error", err)
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(tokenPath), 0o700); err != nil {
+		logger.Warn("creating token dir", "error", err)
+	}
+	if err := os.WriteFile(tokenPath, []byte(token), 0o600); err != nil {
+		logger.Warn("writing token file", "error", err)
+	}
+	ttl := cfg.Enrollment.TokenTTL
+	if ttl == 0 {
+		ttl = 24 * time.Hour
+	}
+	expires := time.Now().UTC().Add(ttl).Format(time.RFC3339)
+	logger.Info("SLUICE_ENROLL_TOKEN",
+		"token", token,
+		"fingerprint", fingerprint,
+		"expires", expires,
+		"ttl", ttl.String(),
+	)
+	// Human-friendly stderr banner so operators can grep it out of docker logs.
+	fmt.Fprintf(os.Stderr, "\n")
+	fmt.Fprintf(os.Stderr, "SLUICE_ENROLL_TOKEN=%s\n", token)
+	fmt.Fprintf(os.Stderr, "SLUICE_SERVER_FINGERPRINT=%s\n", fingerprint)
+	fmt.Fprintf(os.Stderr, "Expires: %s (%s)\n", expires, ttl)
+	fmt.Fprintf(os.Stderr, "\n")
+}
+
+func bannerTestingUI(cfg *config.Config, logger *slog.Logger) {
+	scheme := "http"
+	if cfg.TestingUI.UseTLS {
+		scheme = "https"
+	}
+	banner := []string{
+		"",
+		"  ⚠  SLUICE TESTING UI IS ENABLED",
+		"  ⚠  This exposes the sanitization engine over " + strings.ToUpper(scheme) + ".",
+		"  ⚠  Do NOT enable in production. Bind to localhost only.",
+		"  ⚠  Listening on " + scheme + "://" + cfg.TestingUI.Addr + " (auth required)",
+		"",
+	}
+	for _, line := range banner {
+		fmt.Fprintln(os.Stderr, line)
+	}
+	logger.Warn("testing UI enabled",
+		"addr", cfg.TestingUI.Addr,
+		"tls", cfg.TestingUI.UseTLS,
+		"auth", cfg.TestingUI.RequireAuth,
+	)
+}
+
+// ---- Helpers ---------------------------------------------------------------
+
+func loadConfigOrDefault(path string) *config.Config {
+	cfg, err := config.Load(path)
+	if err != nil {
+		cfg = config.Default()
+		slog.Warn("using default config", "reason", err)
+	}
+	return cfg
+}
+
+func newLogger(cfg *config.Config) *slog.Logger {
+	var h slog.Handler
+	opts := &slog.HandlerOptions{Level: parseLogLevel(cfg.Logging.Level)}
+	if cfg.Logging.Format == "json" {
+		h = slog.NewJSONHandler(os.Stdout, opts)
+	} else {
+		h = slog.NewTextHandler(os.Stdout, opts)
+	}
+	return slog.New(h)
+}
+
+func parseLogLevel(level string) slog.Level {
+	switch strings.ToLower(level) {
+	case "debug":
+		return slog.LevelDebug
+	case "warn":
+		return slog.LevelWarn
+	case "error":
+		return slog.LevelError
+	default:
+		return slog.LevelInfo
+	}
+}
+
+func buildDispatcher(logger *slog.Logger) *sanitizer.Dispatcher {
+	d := sanitizer.NewDispatcher()
+	d.Register(sanitizer.NewOfficeSanitizer(logger))
+	d.Register(sanitizer.NewPDFSanitizer(logger))
+	d.Register(sanitizer.NewImageSanitizer(logger))
+	d.Register(sanitizer.NewSVGSanitizer(logger))
+	d.Register(sanitizer.NewArchiveSanitizer(d, logger))
+	return d
+}
+
+func tlsHosts(cfg *config.Config) []string {
+	return []string{"localhost", "127.0.0.1", "::1"}
+}
+
+func ensureDataDir(cfg *config.Config, logger *slog.Logger) {
+	paths := []string{
+		filepath.Dir(cfg.Enrollment.TokenFile),
+		filepath.Dir(cfg.Server.TLS.CAFile),
+		filepath.Dir(cfg.CLI.SocketPath),
+	}
+	seen := map[string]bool{}
+	for _, p := range paths {
+		if p == "" || p == "." || seen[p] {
+			continue
+		}
+		seen[p] = true
+		if err := os.MkdirAll(p, 0o700); err != nil {
+			logger.Warn("creating dir", "path", p, "error", err)
+		}
+	}
+}
+
+// ---- Self-test -------------------------------------------------------------
+
 func selfTest(d *sanitizer.Dispatcher, logger *slog.Logger) error {
 	tests := []struct {
 		name string
@@ -146,15 +434,12 @@ func selfTest(d *sanitizer.Dispatcher, logger *slog.Logger) error {
 			return fmt.Errorf("self-test %s: %w", tt.name, err)
 		}
 		if result != nil && result.Status == sanitizer.StatusError {
-			// StatusError on minimal test files is acceptable (e.g., minimal
-			// PDF may not fully parse). The important thing is it didn't panic.
 			logger.Debug("self-test warning", "file", tt.name, "status", "error")
 		}
 	}
 	return nil
 }
 
-// miniZIP creates a minimal ZIP with one entry.
 func miniZIP(name, content string) []byte {
 	var buf bytes.Buffer
 	w := zip.NewWriter(&buf)
@@ -164,7 +449,6 @@ func miniZIP(name, content string) []byte {
 	return buf.Bytes()
 }
 
-// miniPNG creates a 1x1 white PNG.
 func miniPNG() []byte {
 	img := image.NewRGBA(image.Rect(0, 0, 1, 1))
 	img.Set(0, 0, color.White)
@@ -173,17 +457,9 @@ func miniPNG() []byte {
 	return buf.Bytes()
 }
 
-func parseLogLevel(level string) slog.Level {
-	switch level {
-	case "debug":
-		return slog.LevelDebug
-	case "info":
-		return slog.LevelInfo
-	case "warn":
-		return slog.LevelWarn
-	case "error":
-		return slog.LevelError
-	default:
-		return slog.LevelInfo
-	}
-}
+// ---- unused-fallback guards (silence linter for tls.VersionTLS13 import) ---
+
+var (
+	_ = tls.VersionTLS13
+	_ = errors.New
+)

@@ -1,0 +1,51 @@
+# Standalone Sluice — for deploying Sluice as an independent CDR service
+# that serves multiple Culvert nodes (or any future proto client) over the
+# network.
+#
+# Differences from the co-located deploy/docker-compose.yml:
+#   - gRPC binds 0.0.0.0:8443 (exposed on all interfaces for cross-host callers)
+#   - Prometheus on 0.0.0.0:9090 for cluster-wide scraping
+#   - No loopback restriction
+#
+# You are still expected to firewall 8443/tcp so only trusted Culvert
+# subnets can reach the port. mTLS provides auth but not anti-DoS.
+#
+# Usage:
+#   docker compose -f deploy/docker-compose.standalone.yml up -d
+#
+# Bring capacity up by running N copies behind DNS (each with its own
+# CA and enrollment flow, or a shared CA distributed through your secret
+# manager) — Sluice is stateless and Culvert's client pool load-balances
+# across N instances.
+services:
+  sluice:
+    image: ghcr.io/kidcarmi/sluice:latest
+    container_name: sluice
+    restart: unless-stopped
+    user: "65532:65532"
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      # mTLS gRPC — bound on all interfaces. Gate access with a host or
+      # cloud firewall (e.g. iptables, AWS SG, Azure NSG, GCP VPC firewall).
+      - "8443:8443"
+      # Prometheus scrape — same advice applies. Typically this is an
+      # in-cluster metric so bind it to an internal interface if you have one.
+      - "9090:9090"
+    volumes:
+      - sluice-data:/data
+    environment:
+      - TZ=UTC
+    healthcheck:
+      test: ["CMD", "/sluice", "health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  sluice-data:

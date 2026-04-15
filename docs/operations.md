@@ -1,6 +1,51 @@
 # Sluice Operations Runbook
 
-Day-2 operations for operators running Sluice alongside Culvert.
+Day-2 operations for operators running Sluice — whether co-located with a
+single Culvert, shared across a team, or deployed as a dedicated fleet.
+
+---
+
+## Backup & disaster recovery
+
+Everything that needs to survive an outage lives under `/data` (the
+`sluice-data` volume in compose).
+
+### What to back up
+
+| Path | Priority | If lost |
+|---|---|---|
+| `/data/ca.pem`, `/data/ca-key.pem` | **Mandatory** | Every Culvert must re-enroll. CA has 10-year validity — back it up once, rotate only on compromise. |
+| `/data/server.pem`, `/data/server-key.pem` | Nice to have | Regenerated automatically by `BootstrapServerCerts` on daemon start if missing. Fingerprint changes — plan for server-rotate afterward. |
+| `/data/clients.json` | Recommended | Revocation history lost. Existing client certs still work (they're valid against the CA); you lose the ability to enumerate/revoke by fingerprint until RenewCert repopulates. |
+| `/data/enrollment_token` | Discardable | Regenerate with `sluice token rotate`. |
+| `/data/ui_token` | Discardable | Auto-regenerated on next daemon start. |
+
+### Minimum backup
+
+```bash
+docker exec culvert-sluice tar -C /data -cf - ca.pem ca-key.pem clients.json \
+  | gpg --encrypt --recipient ops@your-org > sluice-backup-$(date +%F).tar.gpg
+```
+
+Store the GPG-encrypted archive in your existing secret manager (Vault,
+sealed-secrets, AWS Secrets Manager, etc.) — the CA private key has the
+same blast radius as any other root signing key.
+
+### Restore
+
+```bash
+# On the new host, before the daemon starts:
+gpg --decrypt sluice-backup-YYYY-MM-DD.tar.gpg | docker run -i --rm \
+  -v sluice-data:/data --entrypoint tar \
+  ghcr.io/kidcarmi/sluice:latest -C /data -xf -
+
+# Then start normally:
+docker compose up -d sluice
+```
+
+All Culverts keep working — their client certs were signed by the CA you
+just restored, and the ledger knows them. Server cert is regenerated from
+the restored CA on first boot.
 
 ---
 

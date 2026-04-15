@@ -67,9 +67,16 @@ func GenerateCA() (certPEM, keyPEM []byte, err error) {
 	return certPEM, keyPEM, nil
 }
 
-// GenerateClientCert creates a client certificate signed by the given CA.
-// Returns PEM-encoded cert and key.
+// GenerateClientCert creates a client certificate signed by the given CA with
+// a generic "Sluice Client" common name.
 func GenerateClientCert(caCertPEM, caKeyPEM []byte) (certPEM, keyPEM []byte, err error) {
+	return GenerateClientCertForCN(caCertPEM, caKeyPEM, "Sluice Client")
+}
+
+// GenerateClientCertForCN creates a client certificate with a specific Common
+// Name. Used by RenewClient so the renewed cert keeps the same identity as
+// the presented cert.
+func GenerateClientCertForCN(caCertPEM, caKeyPEM []byte, commonName string) (certPEM, keyPEM []byte, err error) {
 	caCert, caKey, err := parseCA(caCertPEM, caKeyPEM)
 	if err != nil {
 		return nil, nil, fmt.Errorf("parsing CA material: %w", err)
@@ -89,7 +96,7 @@ func GenerateClientCert(caCertPEM, caKeyPEM []byte) (certPEM, keyPEM []byte, err
 		SerialNumber: serial,
 		Subject: pkix.Name{
 			Organization: []string{"Sluice CDR"},
-			CommonName:   "Sluice Client",
+			CommonName:   commonName,
 		},
 		NotBefore: time.Now().Add(-1 * time.Minute),
 		NotAfter:  time.Now().Add(365 * 24 * time.Hour),
@@ -347,4 +354,54 @@ func parseCA(certPEM, keyPEM []byte) (*x509.Certificate, *ecdsa.PrivateKey, erro
 func randomSerial() (*big.Int, error) {
 	serialLimit := new(big.Int).Lsh(big.NewInt(1), 128)
 	return rand.Int(rand.Reader, serialLimit)
+}
+
+// certValidityWindow decodes a PEM cert and returns its (NotAfter, NotBefore).
+// Helper for RenewClient so callers don't re-parse the cert.
+func certValidityWindow(certPEM []byte) (notAfter, notBefore time.Time, err error) {
+	block, _ := pem.Decode(certPEM)
+	if block == nil {
+		return time.Time{}, time.Time{}, fmt.Errorf("decoding certificate: no PEM block found")
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return time.Time{}, time.Time{}, fmt.Errorf("parsing certificate: %w", err)
+	}
+	return cert.NotAfter, cert.NotBefore, nil
+}
+
+// CertCommonName extracts the Subject Common Name from a PEM cert.
+func CertCommonName(certPEM []byte) (string, error) {
+	block, _ := pem.Decode(certPEM)
+	if block == nil {
+		return "", fmt.Errorf("decoding certificate: no PEM block found")
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return "", fmt.Errorf("parsing certificate: %w", err)
+	}
+	return cert.Subject.CommonName, nil
+}
+
+// recordIssuedCert extracts metadata from a freshly-issued PEM cert and
+// appends a record to the ledger. Called from Enroll + RenewClient paths.
+func recordIssuedCert(ledger *ClientLedger, certPEM []byte) error {
+	fingerprint, err := CertFingerprintSHA256(certPEM)
+	if err != nil {
+		return fmt.Errorf("computing fingerprint: %w", err)
+	}
+	cn, err := CertCommonName(certPEM)
+	if err != nil {
+		return fmt.Errorf("reading common name: %w", err)
+	}
+	notAfter, notBefore, err := certValidityWindow(certPEM)
+	if err != nil {
+		return fmt.Errorf("reading validity window: %w", err)
+	}
+	return ledger.Add(ClientRecord{
+		Fingerprint:  fingerprint,
+		CommonName:   cn,
+		IssuedAtUnix: notBefore.Unix(),
+		NotAfterUnix: notAfter.Unix(),
+	})
 }

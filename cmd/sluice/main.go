@@ -14,7 +14,10 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
+	"crypto/x509"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -62,6 +65,10 @@ func main() {
 		case "version":
 			fmt.Printf("sluice %s\n", version)
 			os.Exit(0)
+		case "node":
+			os.Exit(runNodeCommand(os.Args[2:]))
+		case "cert":
+			os.Exit(runCertCommand(os.Args[2:]))
 		}
 	}
 
@@ -154,6 +161,20 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Client cert ledger — persists issued certs for revocation. Enrollment
+	// manager writes records; interceptor reads them.
+	ledgerPath := filepath.Join(filepath.Dir(cfg.Enrollment.TokenFile), "clients.json")
+	clientLedger, err := auth.NewClientLedger(ledgerPath)
+	if err != nil {
+		logger.Error("loading client ledger", "error", err)
+		os.Exit(1)
+	}
+	enroller.SetLedger(clientLedger)
+
+	// Server-cert fingerprint tracker — owns current + rotated fingerprint
+	// during dual-pin migrations. Starts with just the current fingerprint.
+	fpTracker := auth.NewFingerprintTracker(fingerprint)
+
 	grpcServer := grpc.NewServer(
 		grpc.Creds(credentials.NewTLS(tlsCfg)),
 		grpc.MaxRecvMsgSize(4<<20), // 4 MB per-message
@@ -166,11 +187,13 @@ func main() {
 			MinTime:             10 * time.Second,
 			PermitWithoutStream: true,
 		}),
-		grpc.UnaryInterceptor(requireClientCertUnary),
-		grpc.StreamInterceptor(requireClientCertStream),
+		grpc.UnaryInterceptor(newAuthUnaryInterceptor(clientLedger, logger)),
+		grpc.StreamInterceptor(newAuthStreamInterceptor(clientLedger, logger)),
 	)
 
 	sluiceServer := server.New(dispatcher, pool, enroller, logger, version, cfg.Limits.MaxFileSize, cfg.Server.GRPCAddr)
+	sluiceServer.SetLedger(clientLedger)
+	sluiceServer.SetFingerprintTracker(fpTracker)
 	pb.RegisterSluiceServiceServer(grpcServer, sluiceServer)
 
 	// Public mTLS listener.
@@ -241,26 +264,80 @@ func shutdownGracefully(s *grpc.Server, logger *slog.Logger) {
 	}
 }
 
-// requireClientCertUnary rejects unary RPCs (except Enroll) whose caller did
-// not present a verified client certificate.
-func requireClientCertUnary(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
-	if rpcAllowedWithoutClientCert(info.FullMethod) {
+// newAuthUnaryInterceptor returns a unary interceptor that:
+//  1. Allows Enroll without a client cert (chicken-and-egg bootstrap).
+//  2. Rejects any other RPC without a verified client cert.
+//  3. Rejects any RPC whose presenting cert is in the revocation ledger.
+//
+// The ledger may be nil (tests); in that case revocation checks are skipped.
+func newAuthUnaryInterceptor(ledger *auth.ClientLedger, logger *slog.Logger) grpc.UnaryServerInterceptor {
+	return func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
+		if rpcAllowedWithoutClientCert(info.FullMethod) {
+			return handler(ctx, req)
+		}
+		if err := enforceVerifiedAndNotRevoked(ctx, ledger, info.FullMethod, logger); err != nil {
+			return nil, err
+		}
 		return handler(ctx, req)
 	}
-	if !hasVerifiedClientCert(ctx) {
-		return nil, status.Error(codes.Unauthenticated, "mTLS client certificate required")
-	}
-	return handler(ctx, req)
 }
 
-func requireClientCertStream(srv any, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
-	if rpcAllowedWithoutClientCert(info.FullMethod) {
+func newAuthStreamInterceptor(ledger *auth.ClientLedger, logger *slog.Logger) grpc.StreamServerInterceptor {
+	return func(srv any, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
+		if rpcAllowedWithoutClientCert(info.FullMethod) {
+			return handler(srv, ss)
+		}
+		if err := enforceVerifiedAndNotRevoked(ss.Context(), ledger, info.FullMethod, logger); err != nil {
+			return err
+		}
 		return handler(srv, ss)
 	}
-	if !hasVerifiedClientCert(ss.Context()) {
+}
+
+// enforceVerifiedAndNotRevoked is the shared check body for unary + stream
+// interceptors: valid mTLS peer + unrevoked fingerprint.
+func enforceVerifiedAndNotRevoked(ctx context.Context, ledger *auth.ClientLedger, method string, logger *slog.Logger) error {
+	cert, ok := verifiedClientCert(ctx)
+	if !ok {
 		return status.Error(codes.Unauthenticated, "mTLS client certificate required")
 	}
-	return handler(srv, ss)
+	if ledger != nil {
+		fp := "sha256:" + sha256HexOfDER(cert.Raw)
+		if ledger.IsRevoked(fp) {
+			logger.Warn("rejected RPC from revoked client",
+				"method", method,
+				"common_name", cert.Subject.CommonName,
+				"fingerprint", fp,
+			)
+			return status.Error(codes.PermissionDenied, "client certificate has been revoked")
+		}
+	}
+	return nil
+}
+
+// verifiedClientCert returns the first cert in the verified chain, or (nil, false)
+// if the peer did not present a cert that passed verification.
+func verifiedClientCert(ctx context.Context) (*x509.Certificate, bool) {
+	p, ok := peerFrom(ctx)
+	if !ok || p.AuthInfo == nil {
+		return nil, false
+	}
+	ti, ok := p.AuthInfo.(credentials.TLSInfo)
+	if !ok {
+		return nil, false
+	}
+	if len(ti.State.VerifiedChains) == 0 || len(ti.State.VerifiedChains[0]) == 0 {
+		return nil, false
+	}
+	return ti.State.VerifiedChains[0][0], true
+}
+
+// sha256HexOfDER mirrors server.sha256HexOfDER — kept local to avoid an
+// import cycle (main → server → auth would be fine, but main → auth only
+// keeps this layer lightweight).
+func sha256HexOfDER(der []byte) string {
+	sum := sha256.Sum256(der)
+	return hex.EncodeToString(sum[:])
 }
 
 // rpcAllowedWithoutClientCert is the explicit allow-list of RPCs that do not
@@ -268,19 +345,6 @@ func requireClientCertStream(srv any, ss grpc.ServerStream, info *grpc.StreamSer
 func rpcAllowedWithoutClientCert(method string) bool {
 	// method is like "/sluice.v1.SluiceService/Enroll"
 	return strings.HasSuffix(method, "/Enroll")
-}
-
-// hasVerifiedClientCert inspects the TLS peer info for a verified chain.
-func hasVerifiedClientCert(ctx context.Context) bool {
-	p, ok := peerFrom(ctx)
-	if !ok {
-		return false
-	}
-	ti, ok := p.AuthInfo.(credentials.TLSInfo)
-	if !ok {
-		return false
-	}
-	return len(ti.State.VerifiedChains) > 0
 }
 
 // ---- First-boot token + banner --------------------------------------------

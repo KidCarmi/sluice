@@ -79,26 +79,69 @@ Prints the binary version.
 
 ---
 
-## v0.2 (stubbed / not-yet-implemented)
+---
 
-These commands are part of the planned v0.2 surface and currently exit
-with a non-zero code and a "not implemented" message. Listed here so tooling
-can be wired against the final names.
+## `sluice node list [--all] [--json]`
 
-| Command | Purpose |
-|---------|---------|
-| `sluice node list` | List enrolled clients |
-| `sluice node show <name>` | Details + cert expiry |
-| `sluice node revoke <name>` | Revoke one client |
-| `sluice node revoke-all` | Emergency: regen CA |
-| `sluice cert server-rotate` | New server cert (zero downtime) |
-| `sluice cert ca-rotate` | New CA (forces re-enrollment) |
-| `sluice cert expiry` | Days-until-expiry |
-| `sluice profile list` | Sanitization profiles |
-| `sluice profile show <name>` | Capabilities + limits |
-| `sluice ui-token rotate` | Rotate testing UI bearer token |
-| `sluice config show` | Dump effective config |
-| `sluice config validate <file>` | Lint a config file |
+Lists enrolled clients from the ledger at `/data/clients.json`.
 
-Every command that ships in v0.1 supports `--json` for machine-readable
-output. (Flag plumbing lands with v0.2 node/profile commands.)
+Flags:
+- `--all` — include revoked and expired records (default: active only)
+- `--json` — emit raw JSON records instead of a table
+
+Output (table):
+```
+FINGERPRINT                                                               ISSUED                  EXPIRES IN    STATUS
+sha256:a1b2c3...                                                          2026-04-14T22:30Z       8760h0m0s     active
+```
+
+---
+
+## `sluice node show <fingerprint>`
+
+Prints the JSON ledger record for one client. Exit `1` if not found.
+
+---
+
+## `sluice node revoke [--reason ...] <fingerprint>`
+
+Synchronously revokes one client cert. If the daemon is running the
+revocation is applied over the unix socket (in-memory + on-disk atomic);
+if not, the ledger file is written directly and the daemon picks it up on
+next boot.
+
+---
+
+## `sluice node revoke-all --yes [--reason ...]`
+
+Revokes every active client. Does NOT rotate the CA — use when you want to
+force every Culvert node to re-enroll without minting a fresh CA. Requires
+`--yes` to guard against typos.
+
+---
+
+## `sluice cert server-rotate [--grace 24h]`
+
+Swaps the server cert for a fresh one signed by the existing CA.
+
+`--grace` controls how long the PREVIOUS server-cert fingerprint is
+advertised in `HealthResponse.rotated_fingerprint` so Culvert can continue
+to accept connections after its pin was for the old cert. Default 24h.
+
+Prints old and new fingerprints plus the next steps. Restart the daemon
+after running this command (it reads certs from disk at startup).
+
+---
+
+## `sluice cert ca-rotate --yes`
+
+Regenerates the CA. INVALIDATES EVERY CLIENT CERT — all Culvert nodes must
+re-enroll. Requires `--yes`. Use only if the CA private key is suspected
+compromised.
+
+---
+
+## `sluice cert expiry`
+
+Prints the current server cert's Common Name and SHA-256 fingerprint.
+(Days-until-expiry is on the v0.3 roadmap.)

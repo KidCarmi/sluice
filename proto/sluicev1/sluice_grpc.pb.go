@@ -19,9 +19,11 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	SluiceService_Sanitize_FullMethodName = "/sluice.v1.SluiceService/Sanitize"
-	SluiceService_Health_FullMethodName   = "/sluice.v1.SluiceService/Health"
-	SluiceService_Enroll_FullMethodName   = "/sluice.v1.SluiceService/Enroll"
+	SluiceService_Sanitize_FullMethodName     = "/sluice.v1.SluiceService/Sanitize"
+	SluiceService_Health_FullMethodName       = "/sluice.v1.SluiceService/Health"
+	SluiceService_Enroll_FullMethodName       = "/sluice.v1.SluiceService/Enroll"
+	SluiceService_RenewCert_FullMethodName    = "/sluice.v1.SluiceService/RenewCert"
+	SluiceService_RevokeClient_FullMethodName = "/sluice.v1.SluiceService/RevokeClient"
 )
 
 // SluiceServiceClient is the client API for SluiceService service.
@@ -40,6 +42,24 @@ type SluiceServiceClient interface {
 	// Does NOT require a client cert (chicken-and-egg). Clients must TOFU-verify
 	// the server cert fingerprint before sending the token.
 	Enroll(ctx context.Context, in *EnrollRequest, opts ...grpc.CallOption) (*EnrollResponse, error)
+	// RenewCert mints a fresh client certificate for an already-enrolled caller.
+	// Requires a valid, unrevoked client cert on the mTLS channel; the new cert
+	// uses the same Common Name as the presented one. The old cert keeps working
+	// until its own NotAfter — this method does NOT revoke it (to avoid breaking
+	// in-flight streams). Callers who want to revoke the old cert must call
+	// RevokeClient(old_fingerprint) separately.
+	//
+	// Auto-renewal policy is up to the client. Sluice exposes
+	// days_until_expiry in the response so pollers can decide when to call next.
+	RenewCert(ctx context.Context, in *RenewCertRequest, opts ...grpc.CallOption) (*RenewCertResponse, error)
+	// RevokeClient immediately revokes a previously-issued client certificate
+	// by its SHA-256 fingerprint. Synchronous: on return, the revocation is
+	// persisted and the in-memory revoke-set is updated. Any subsequent RPC
+	// from that client fails with PermissionDenied.
+	//
+	// Requires a valid mTLS client cert on the calling channel; callers cannot
+	// revoke themselves by accident (use RevokeClient only for OTHER clients).
+	RevokeClient(ctx context.Context, in *RevokeClientRequest, opts ...grpc.CallOption) (*RevokeClientResponse, error)
 }
 
 type sluiceServiceClient struct {
@@ -83,6 +103,26 @@ func (c *sluiceServiceClient) Enroll(ctx context.Context, in *EnrollRequest, opt
 	return out, nil
 }
 
+func (c *sluiceServiceClient) RenewCert(ctx context.Context, in *RenewCertRequest, opts ...grpc.CallOption) (*RenewCertResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RenewCertResponse)
+	err := c.cc.Invoke(ctx, SluiceService_RenewCert_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sluiceServiceClient) RevokeClient(ctx context.Context, in *RevokeClientRequest, opts ...grpc.CallOption) (*RevokeClientResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RevokeClientResponse)
+	err := c.cc.Invoke(ctx, SluiceService_RevokeClient_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // SluiceServiceServer is the server API for SluiceService service.
 // All implementations must embed UnimplementedSluiceServiceServer
 // for forward compatibility.
@@ -99,6 +139,24 @@ type SluiceServiceServer interface {
 	// Does NOT require a client cert (chicken-and-egg). Clients must TOFU-verify
 	// the server cert fingerprint before sending the token.
 	Enroll(context.Context, *EnrollRequest) (*EnrollResponse, error)
+	// RenewCert mints a fresh client certificate for an already-enrolled caller.
+	// Requires a valid, unrevoked client cert on the mTLS channel; the new cert
+	// uses the same Common Name as the presented one. The old cert keeps working
+	// until its own NotAfter — this method does NOT revoke it (to avoid breaking
+	// in-flight streams). Callers who want to revoke the old cert must call
+	// RevokeClient(old_fingerprint) separately.
+	//
+	// Auto-renewal policy is up to the client. Sluice exposes
+	// days_until_expiry in the response so pollers can decide when to call next.
+	RenewCert(context.Context, *RenewCertRequest) (*RenewCertResponse, error)
+	// RevokeClient immediately revokes a previously-issued client certificate
+	// by its SHA-256 fingerprint. Synchronous: on return, the revocation is
+	// persisted and the in-memory revoke-set is updated. Any subsequent RPC
+	// from that client fails with PermissionDenied.
+	//
+	// Requires a valid mTLS client cert on the calling channel; callers cannot
+	// revoke themselves by accident (use RevokeClient only for OTHER clients).
+	RevokeClient(context.Context, *RevokeClientRequest) (*RevokeClientResponse, error)
 	mustEmbedUnimplementedSluiceServiceServer()
 }
 
@@ -117,6 +175,12 @@ func (UnimplementedSluiceServiceServer) Health(context.Context, *HealthRequest) 
 }
 func (UnimplementedSluiceServiceServer) Enroll(context.Context, *EnrollRequest) (*EnrollResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Enroll not implemented")
+}
+func (UnimplementedSluiceServiceServer) RenewCert(context.Context, *RenewCertRequest) (*RenewCertResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RenewCert not implemented")
+}
+func (UnimplementedSluiceServiceServer) RevokeClient(context.Context, *RevokeClientRequest) (*RevokeClientResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RevokeClient not implemented")
 }
 func (UnimplementedSluiceServiceServer) mustEmbedUnimplementedSluiceServiceServer() {}
 func (UnimplementedSluiceServiceServer) testEmbeddedByValue()                       {}
@@ -182,6 +246,42 @@ func _SluiceService_Enroll_Handler(srv interface{}, ctx context.Context, dec fun
 	return interceptor(ctx, in, info, handler)
 }
 
+func _SluiceService_RenewCert_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RenewCertRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SluiceServiceServer).RenewCert(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SluiceService_RenewCert_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SluiceServiceServer).RenewCert(ctx, req.(*RenewCertRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SluiceService_RevokeClient_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RevokeClientRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SluiceServiceServer).RevokeClient(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SluiceService_RevokeClient_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SluiceServiceServer).RevokeClient(ctx, req.(*RevokeClientRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // SluiceService_ServiceDesc is the grpc.ServiceDesc for SluiceService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -196,6 +296,14 @@ var SluiceService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Enroll",
 			Handler:    _SluiceService_Enroll_Handler,
+		},
+		{
+			MethodName: "RenewCert",
+			Handler:    _SluiceService_RenewCert_Handler,
+		},
+		{
+			MethodName: "RevokeClient",
+			Handler:    _SluiceService_RevokeClient_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

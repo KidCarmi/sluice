@@ -33,6 +33,26 @@ type EnrollmentManager struct {
 	caKey  []byte                // PEM
 	ttl    time.Duration
 	logger *slog.Logger
+
+	// ledger is optional; when set, every successfully-issued client cert is
+	// recorded so it can later be listed/revoked. Nil ledger disables the
+	// persistence layer (useful for tests that want pure in-memory behaviour).
+	ledger *ClientLedger
+}
+
+// SetLedger wires a persistent client cert ledger to the manager. Subsequent
+// Enroll / RenewClient calls will record issued certs.
+func (m *EnrollmentManager) SetLedger(l *ClientLedger) {
+	m.mu.Lock()
+	m.ledger = l
+	m.mu.Unlock()
+}
+
+// Ledger returns the wired ledger (may be nil).
+func (m *EnrollmentManager) Ledger() *ClientLedger {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.ledger
 }
 
 // NewEnrollmentManager creates a manager. If caCert/caKey are nil, it generates a new CA.
@@ -130,6 +150,7 @@ func (m *EnrollmentManager) Enroll(token string) (caCert, clientCert, clientKey 
 		return nil, nil, nil, fmt.Errorf("enrollment failed: token expired")
 	}
 	delete(m.tokens, h) // consume-and-delete
+	ledger := m.ledger
 	m.mu.Unlock()
 
 	clientCert, clientKey, err = GenerateClientCert(m.caCert, m.caKey)
@@ -137,8 +158,52 @@ func (m *EnrollmentManager) Enroll(token string) (caCert, clientCert, clientKey 
 		return nil, nil, nil, fmt.Errorf("generating client certificate during enrollment: %w", err)
 	}
 
+	// Record the issued cert so it can later be listed / revoked.
+	if ledger != nil {
+		if err := recordIssuedCert(ledger, clientCert); err != nil {
+			m.logger.Warn("recording issued cert", "error", err)
+		}
+	}
+
 	m.logger.Info("enrollment completed successfully")
 	return m.caCert, clientCert, clientKey, nil
+}
+
+// RenewClient mints a fresh client certificate for an already-enrolled caller.
+// The caller is identified by its presented cert's Common Name (passed via
+// commonName). Returns the new cert + key plus the cert's NotAfter so callers
+// can report days_until_expiry without re-parsing.
+//
+// This does NOT revoke the presented cert — operators who want to revoke the
+// old cert after a successful renewal must call ledger.Revoke explicitly.
+func (m *EnrollmentManager) RenewClient(commonName string) (clientCert, clientKey []byte, notAfter time.Time, err error) {
+	if commonName == "" {
+		return nil, nil, time.Time{}, fmt.Errorf("renew: empty common name")
+	}
+
+	m.mu.Lock()
+	ledger := m.ledger
+	m.mu.Unlock()
+
+	clientCert, clientKey, err = GenerateClientCertForCN(m.caCert, m.caKey, commonName)
+	if err != nil {
+		return nil, nil, time.Time{}, fmt.Errorf("generating renewed certificate: %w", err)
+	}
+
+	// Extract NotAfter from the fresh cert so the caller doesn't re-parse.
+	notAfter, _, err = certValidityWindow(clientCert)
+	if err != nil {
+		return nil, nil, time.Time{}, fmt.Errorf("parsing renewed cert: %w", err)
+	}
+
+	if ledger != nil {
+		if err := recordIssuedCert(ledger, clientCert); err != nil {
+			m.logger.Warn("recording renewed cert", "error", err)
+		}
+	}
+
+	m.logger.Info("client cert renewed", "common_name", commonName)
+	return clientCert, clientKey, notAfter, nil
 }
 
 // ValidToken reports whether a plaintext token is known and unconsumed (and unexpired).

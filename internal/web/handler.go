@@ -409,7 +409,7 @@ func (h *Handler) handleHealth(w http.ResponseWriter, _ *http.Request) {
 
 	resp := map[string]interface{}{
 		"healthy":         healthy,
-		"version":         "0.1.0",
+		"version":         "0.2.0",
 		"supported_types": []string{"pdf", "docx", "xlsx", "pptx", "jpeg", "png", "gif", "svg", "zip"},
 		"active_workers":  activeWorkers,
 		"queue_depth":     queueDepth,

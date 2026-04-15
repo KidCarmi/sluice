@@ -4,17 +4,18 @@ services:
     container_name: culvert-sluice
     restart: unless-stopped
     # Run as the distroless nonroot user directly, bypassing the runtime
-    # UID switch. Combined with cap_drop: ALL and no-new-privileges, runc
-    # would otherwise fail execve with EPERM because it can't setuid from
-    # root → nonroot without CAP_SETUID.
+    # UID switch. Combined with cap_drop: ALL this avoids needing CAP_SETUID
+    # to drop privileges at exec time.
     user: "65532:65532"
     read_only: true
     tmpfs:
       - /tmp
     cap_drop:
       - ALL
-    security_opt:
-      - no-new-privileges:true
+    # NOTE: `security_opt: no-new-privileges:true` is omitted because on some
+    # Ubuntu hosts (with the default AppArmor + seccomp profile) it causes
+    # `exec /sluice: operation not permitted` on distroless bases. Enable it
+    # only if you've tested your host is compatible.
     ports:
       # mTLS gRPC — bound to localhost so only Culvert (same host) reaches it.
       - "127.0.0.1:8443:8443"

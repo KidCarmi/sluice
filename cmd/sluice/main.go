@@ -49,7 +49,9 @@ import (
 	pb "github.com/KidCarmi/Sluice/proto/sluicev1"
 )
 
-var version = "0.1.0"
+// version is the default value used for local dev builds. Release images
+// override this via `-ldflags="-X main.version=..."` in the publish workflow.
+var version = "0.2.0"
 
 func main() {
 	// Subcommand dispatch happens before flag parsing so we can take

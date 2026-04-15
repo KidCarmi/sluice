@@ -19,32 +19,35 @@ their certs are signed by the persistent CA in `/data/tls/ca.pem`.
 ## Rotate server certificate (zero downtime)
 
 ```bash
-# v0.2 — command exists as a stub today
-docker exec culvert-sluice sluice cert server-rotate
+docker exec culvert-sluice sluice cert server-rotate --grace 24h
+docker restart culvert-sluice
 ```
 
-Until the stub lands, the procedure is:
-1. Stop the daemon.
-2. Delete `/data/tls/server.pem` and `/data/tls/server-key.pem`
-   (leave `ca.pem` and `ca-key.pem` alone).
-3. Restart — `BootstrapServerCerts` issues a fresh server cert signed by
-   the existing CA. Existing enrolled clients continue to work.
+What happens:
+1. The command mints a fresh server cert signed by the existing CA.
+2. Culvert's next Health call sees `rotated_fingerprint=<old>` +
+   `rotated_fingerprint_until_unix=<now+24h>` and auto-rewrites its
+   pinned fingerprint to the new one.
+3. The old fingerprint stops being accepted by Culvert after the grace
+   window. Existing mTLS client certs are unaffected — the CA didn't
+   change.
 
-Remember to update Culvert's stored fingerprint after rotation
-(`docker exec culvert-sluice sluice fingerprint` → paste into Culvert UI).
+No operator action required on the Culvert side.
 
 ---
 
 ## Rotate CA (forces re-enrollment)
 
 ```bash
-# v0.2 — command stub
-docker exec culvert-sluice sluice cert ca-rotate
+docker exec culvert-sluice sluice cert ca-rotate --yes
+docker restart culvert-sluice
+docker exec culvert-sluice sluice token
+# → paste the new token + fingerprint into Culvert's enroll UI for each instance
 ```
 
-This invalidates all issued client certs. Operators must re-run the
-enrollment flow for every Culvert node. Use only when you suspect the
-CA key was compromised.
+This invalidates every client cert and wipes the ledger. Use only when
+you suspect the CA key was compromised. Culvert nodes will see handshake
+failures until they re-enroll.
 
 ---
 
@@ -63,12 +66,25 @@ Old tokens are revoked; a new token + fingerprint is printed.
 ## Revoke a compromised Culvert node
 
 ```bash
-# v0.2 — command stub
-docker exec culvert-sluice sluice node revoke <name>
+# Look up the fingerprint
+docker exec culvert-sluice sluice node list
+
+# Revoke by fingerprint (sync: in effect on next RPC)
+docker exec culvert-sluice sluice node revoke --reason "suspected compromise" sha256:a1b2c3...
 ```
 
-v0.1 workaround: rotate the CA (see above), which invalidates every
-client cert, then re-enroll the trustworthy nodes.
+The revoked node's next RPC fails with `PermissionDenied`. Persisted
+to `/data/clients.json` so it survives daemon restarts.
+
+**Emergency — revoke every active client without minting a fresh CA:**
+
+```bash
+docker exec culvert-sluice sluice node revoke-all --yes --reason "mass rotation"
+```
+
+All Culvert nodes must re-enroll afterward. Use this instead of
+`ca-rotate` when you want a fast sweep without distributing a new CA
+fingerprint.
 
 ---
 

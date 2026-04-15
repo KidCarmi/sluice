@@ -16,6 +16,8 @@ package server
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/x509"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"log/slog"
@@ -24,6 +26,7 @@ import (
 	"time"
 
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
 
@@ -71,6 +74,8 @@ type Server struct {
 	dispatcher  *sanitizer.Dispatcher
 	pool        *worker.Pool
 	enroller    *auth.EnrollmentManager
+	ledger      *auth.ClientLedger      // optional; nil disables revocation checks
+	fingerprint *auth.FingerprintTracker // optional; nil hides fingerprint fields from Health
 	logger      *slog.Logger
 	version     string
 	maxFileSize int64
@@ -79,6 +84,20 @@ type Server struct {
 	filesProcessed atomic.Int64
 	threatsRemoved atomic.Int64
 }
+
+// SetLedger wires a client-cert ledger so RenewCert/RevokeClient work and
+// the mTLS interceptor can reject revoked fingerprints. Idempotent.
+func (s *Server) SetLedger(l *auth.ClientLedger) { s.ledger = l }
+
+// SetFingerprintTracker wires the server-cert rotation tracker so HealthResponse
+// carries the dual-pin fields and CLI rotation commands can update state.
+func (s *Server) SetFingerprintTracker(t *auth.FingerprintTracker) { s.fingerprint = t }
+
+// Ledger returns the wired ledger (may be nil).
+func (s *Server) Ledger() *auth.ClientLedger { return s.ledger }
+
+// FingerprintTracker returns the wired tracker (may be nil).
+func (s *Server) FingerprintTracker() *auth.FingerprintTracker { return s.fingerprint }
 
 // New constructs a Server. All dependencies must be non-nil.
 func New(
@@ -280,7 +299,7 @@ func sendResultThenClose(stream pb.SluiceService_SanitizeServer, result *pb.Sani
 // Health returns current service status + profile list.
 func (s *Server) Health(ctx context.Context, _ *pb.HealthRequest) (*pb.HealthResponse, error) {
 	_ = ctx
-	return &pb.HealthResponse{
+	resp := &pb.HealthResponse{
 		Healthy:        true,
 		Version:        s.version,
 		SupportedTypes: []string{"pdf", "docx", "xlsx", "pptx", "jpeg", "png", "gif", "svg", "zip"},
@@ -308,7 +327,14 @@ func (s *Server) Health(ctx context.Context, _ *pb.HealthRequest) (*pb.HealthRes
 				MaxFileSizeBytes: s.maxFileSize,
 			},
 		},
-	}, nil
+	}
+	if s.fingerprint != nil {
+		current, previous, until := s.fingerprint.Snapshot()
+		resp.ServerFingerprint = current
+		resp.RotatedFingerprint = previous
+		resp.RotatedFingerprintUntilUnix = until
+	}
+	return resp, nil
 }
 
 // ----- Enroll ----------------------------------------------------------------
@@ -333,6 +359,85 @@ func (s *Server) Enroll(ctx context.Context, req *pb.EnrollRequest) (*pb.EnrollR
 		ClientCert: clientCert,
 		ClientKey:  clientKey,
 		Endpoint:   s.endpoint,
+	}, nil
+}
+
+// ----- RenewCert -------------------------------------------------------------
+
+// RenewCert mints a fresh client cert for the caller, reusing the Common Name
+// from the presented cert. Requires a verified mTLS client cert (enforced by
+// the transport-level interceptor in main.go; we defensively re-check here).
+func (s *Server) RenewCert(ctx context.Context, _ *pb.RenewCertRequest) (*pb.RenewCertResponse, error) {
+	if s.enroller == nil {
+		return nil, status.Error(codes.Unavailable, "enrollment not configured")
+	}
+	presented, err := peerClientCert(ctx)
+	if err != nil {
+		return nil, status.Errorf(codes.Unauthenticated, "renew_cert: %v", err)
+	}
+	commonName := presented.Subject.CommonName
+	fingerprint := "sha256:" + sha256HexOfDER(presented.Raw)
+
+	// Defensive revocation check (the transport interceptor already does this
+	// on every RPC — but repeat here so we fail with a clear RPC-level error
+	// if the interceptor is somehow bypassed in tests).
+	if s.ledger != nil && s.ledger.IsRevoked(fingerprint) {
+		return nil, status.Error(codes.PermissionDenied, "renew_cert: presenting cert has been revoked")
+	}
+
+	clientCert, clientKey, notAfter, err := s.enroller.RenewClient(commonName)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "renew_cert: %v", err)
+	}
+	days := int64(time.Until(notAfter) / (24 * time.Hour))
+	if days < 0 {
+		days = 0
+	}
+	s.logger.Info("client cert renewed", "common_name", commonName)
+	return &pb.RenewCertResponse{
+		ClientCert:       clientCert,
+		ClientKey:        clientKey,
+		DaysUntilExpiry:  days,
+	}, nil
+}
+
+// ----- RevokeClient ----------------------------------------------------------
+
+// RevokeClient synchronously revokes another client's cert by fingerprint.
+// The caller MUST present a verified mTLS cert (enforced by the interceptor);
+// additionally, we refuse to let a client revoke itself (so a compromised
+// client cannot revoke its own audit trail).
+func (s *Server) RevokeClient(ctx context.Context, req *pb.RevokeClientRequest) (*pb.RevokeClientResponse, error) {
+	if s.ledger == nil {
+		return nil, status.Error(codes.Unavailable, "client ledger not configured")
+	}
+	fp := req.GetFingerprint()
+	if fp == "" {
+		return nil, status.Error(codes.InvalidArgument, "fingerprint is required")
+	}
+
+	// Self-revocation guard.
+	if presented, err := peerClientCert(ctx); err == nil {
+		callerFP := "sha256:" + sha256HexOfDER(presented.Raw)
+		if callerFP == fp {
+			return nil, status.Error(codes.InvalidArgument, "revoke_client: cannot revoke the cert you are currently authenticated with")
+		}
+	}
+
+	revoked, err := s.ledger.Revoke(fp, req.GetReason())
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "revoke_client: %v", err)
+	}
+	active := clampInt32(s.ledger.ActiveCount())
+	s.logger.Info("client cert revocation",
+		"fingerprint", fp,
+		"reason", req.GetReason(),
+		"was_active", revoked,
+		"remaining_active", active,
+	)
+	return &pb.RevokeClientResponse{
+		Revoked:        revoked,
+		ActiveClients:  active,
 	}, nil
 }
 
@@ -427,4 +532,30 @@ func clampInt32(v int) int32 {
 		return maxInt32
 	}
 	return int32(v) // #nosec G115 -- bounded above
+}
+
+// peerClientCert returns the verified client cert from the TLS peer on the
+// context. Returns an error if no TLS peer is present or no verified chain
+// was established.
+func peerClientCert(ctx context.Context) (*x509.Certificate, error) {
+	p, ok := peer.FromContext(ctx)
+	if !ok || p.AuthInfo == nil {
+		return nil, fmt.Errorf("no TLS peer info on context")
+	}
+	tlsInfo, ok := p.AuthInfo.(credentials.TLSInfo)
+	if !ok {
+		return nil, fmt.Errorf("peer auth info is not TLS")
+	}
+	if len(tlsInfo.State.VerifiedChains) == 0 || len(tlsInfo.State.VerifiedChains[0]) == 0 {
+		return nil, fmt.Errorf("no verified client cert chain")
+	}
+	return tlsInfo.State.VerifiedChains[0][0], nil
+}
+
+// sha256HexOfDER returns the hex-encoded SHA-256 of a DER certificate.
+// Mirrors auth.sha256FingerprintDER — duplicated here to avoid a package
+// import cycle (server → auth → ...).
+func sha256HexOfDER(der []byte) string {
+	sum := sha256.Sum256(der)
+	return hex.EncodeToString(sum[:])
 }

@@ -18,6 +18,26 @@ service SluiceService {
   // Does NOT require a client cert (chicken-and-egg). Clients must TOFU-verify
   // the server cert fingerprint before sending the token.
   rpc Enroll(EnrollRequest) returns (EnrollResponse);
+
+  // RenewCert mints a fresh client certificate for an already-enrolled caller.
+  // Requires a valid, unrevoked client cert on the mTLS channel; the new cert
+  // uses the same Common Name as the presented one. The old cert keeps working
+  // until its own NotAfter — this method does NOT revoke it (to avoid breaking
+  // in-flight streams). Callers who want to revoke the old cert must call
+  // RevokeClient(old_fingerprint) separately.
+  //
+  // Auto-renewal policy is up to the client. Sluice exposes
+  // days_until_expiry in the response so pollers can decide when to call next.
+  rpc RenewCert(RenewCertRequest) returns (RenewCertResponse);
+
+  // RevokeClient immediately revokes a previously-issued client certificate
+  // by its SHA-256 fingerprint. Synchronous: on return, the revocation is
+  // persisted and the in-memory revoke-set is updated. Any subsequent RPC
+  // from that client fails with PermissionDenied.
+  //
+  // Requires a valid mTLS client cert on the calling channel; callers cannot
+  // revoke themselves by accident (use RevokeClient only for OTHER clients).
+  rpc RevokeClient(RevokeClientRequest) returns (RevokeClientResponse);
 }
 
 message SanitizeRequest {
@@ -125,6 +145,25 @@ message HealthResponse {
   // admin GUI to present a profile picker. v0.1 ships with a single
   // "default" profile; v0.2+ adds aggressive, relaxed, etc.
   repeated Profile profiles = 9;
+
+  // v0.2 — server certificate rotation dual-pin:
+  //
+  // server_fingerprint is the SHA-256 fingerprint of the currently-served
+  // TLS certificate. Format: "sha256:" + lowercase hex. Clients that TOFU-
+  // pinned at enrollment should compare their stored fingerprint against
+  // this OR rotated_fingerprint.
+  string server_fingerprint = 10;
+
+  // rotated_fingerprint is the SHA-256 fingerprint of the PREVIOUS server
+  // cert during a grace window. Empty string when no rotation is active.
+  // Clients MAY accept connections whose handshake cert matches this one
+  // while rotated_fingerprint_until_unix > now(), and auto-rewrite their
+  // pin to server_fingerprint once the window closes.
+  string rotated_fingerprint = 11;
+
+  // rotated_fingerprint_until_unix is the unix timestamp (seconds) after
+  // which rotated_fingerprint MUST be rejected. 0 when no rotation active.
+  int64 rotated_fingerprint_until_unix = 12;
 }
 
 message Profile {
@@ -147,4 +186,37 @@ message EnrollResponse {
   bytes client_cert = 2;
   bytes client_key = 3;
   string endpoint = 4;
+}
+
+// RenewCertRequest is intentionally empty in v0.2 — the caller is identified
+// by its presented mTLS client cert. Wrapper message reserved for forward
+// compatibility.
+message RenewCertRequest {}
+
+message RenewCertResponse {
+  // client_cert is a fresh certificate signed by the server's CA, with the
+  // same Common Name as the presented cert.
+  bytes client_cert = 1;
+  // client_key is the matching private key for client_cert.
+  bytes client_key = 2;
+  // days_until_expiry is a convenience for client poll schedulers —
+  // floor((NotAfter - now) / 24h). Clients typically renew when < 30 days.
+  int64 days_until_expiry = 3;
+}
+
+message RevokeClientRequest {
+  // fingerprint: SHA-256 fingerprint of the client cert to revoke.
+  // Format: "sha256:" + lowercase hex, matching CertFingerprintSHA256 output.
+  string fingerprint = 1;
+  // reason: opaque string echoed back to audit logs. Optional.
+  string reason = 2;
+}
+
+message RevokeClientResponse {
+  // revoked: true when the fingerprint was present in the active clients
+  // list and is now revoked. false when the fingerprint was already revoked
+  // or was never issued by this CA (idempotent behaviour).
+  bool revoked = 1;
+  // active_clients: remaining unrevoked clients, for Culvert dashboards.
+  int32 active_clients = 2;
 }

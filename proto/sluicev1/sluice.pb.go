@@ -640,9 +640,25 @@ type HealthResponse struct {
 	// profiles: sanitization profiles this server offers. Used by Culvert's
 	// admin GUI to present a profile picker. v0.1 ships with a single
 	// "default" profile; v0.2+ adds aggressive, relaxed, etc.
-	Profiles      []*Profile `protobuf:"bytes,9,rep,name=profiles,proto3" json:"profiles,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Profiles []*Profile `protobuf:"bytes,9,rep,name=profiles,proto3" json:"profiles,omitempty"`
+	// v0.2 — server certificate rotation dual-pin:
+	//
+	// server_fingerprint is the SHA-256 fingerprint of the currently-served
+	// TLS certificate. Format: "sha256:" + lowercase hex. Clients that TOFU-
+	// pinned at enrollment should compare their stored fingerprint against
+	// this OR rotated_fingerprint.
+	ServerFingerprint string `protobuf:"bytes,10,opt,name=server_fingerprint,json=serverFingerprint,proto3" json:"server_fingerprint,omitempty"`
+	// rotated_fingerprint is the SHA-256 fingerprint of the PREVIOUS server
+	// cert during a grace window. Empty string when no rotation is active.
+	// Clients MAY accept connections whose handshake cert matches this one
+	// while rotated_fingerprint_until_unix > now(), and auto-rewrite their
+	// pin to server_fingerprint once the window closes.
+	RotatedFingerprint string `protobuf:"bytes,11,opt,name=rotated_fingerprint,json=rotatedFingerprint,proto3" json:"rotated_fingerprint,omitempty"`
+	// rotated_fingerprint_until_unix is the unix timestamp (seconds) after
+	// which rotated_fingerprint MUST be rejected. 0 when no rotation active.
+	RotatedFingerprintUntilUnix int64 `protobuf:"varint,12,opt,name=rotated_fingerprint_until_unix,json=rotatedFingerprintUntilUnix,proto3" json:"rotated_fingerprint_until_unix,omitempty"`
+	unknownFields               protoimpl.UnknownFields
+	sizeCache                   protoimpl.SizeCache
 }
 
 func (x *HealthResponse) Reset() {
@@ -736,6 +752,27 @@ func (x *HealthResponse) GetProfiles() []*Profile {
 		return x.Profiles
 	}
 	return nil
+}
+
+func (x *HealthResponse) GetServerFingerprint() string {
+	if x != nil {
+		return x.ServerFingerprint
+	}
+	return ""
+}
+
+func (x *HealthResponse) GetRotatedFingerprint() string {
+	if x != nil {
+		return x.RotatedFingerprint
+	}
+	return ""
+}
+
+func (x *HealthResponse) GetRotatedFingerprintUntilUnix() int64 {
+	if x != nil {
+		return x.RotatedFingerprintUntilUnix
+	}
+	return 0
 }
 
 type Profile struct {
@@ -922,6 +959,221 @@ func (x *EnrollResponse) GetEndpoint() string {
 	return ""
 }
 
+// RenewCertRequest is intentionally empty in v0.2 — the caller is identified
+// by its presented mTLS client cert. Wrapper message reserved for forward
+// compatibility.
+type RenewCertRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RenewCertRequest) Reset() {
+	*x = RenewCertRequest{}
+	mi := &file_proto_sluicev1_sluice_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RenewCertRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RenewCertRequest) ProtoMessage() {}
+
+func (x *RenewCertRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_sluicev1_sluice_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RenewCertRequest.ProtoReflect.Descriptor instead.
+func (*RenewCertRequest) Descriptor() ([]byte, []int) {
+	return file_proto_sluicev1_sluice_proto_rawDescGZIP(), []int{10}
+}
+
+type RenewCertResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// client_cert is a fresh certificate signed by the server's CA, with the
+	// same Common Name as the presented cert.
+	ClientCert []byte `protobuf:"bytes,1,opt,name=client_cert,json=clientCert,proto3" json:"client_cert,omitempty"`
+	// client_key is the matching private key for client_cert.
+	ClientKey []byte `protobuf:"bytes,2,opt,name=client_key,json=clientKey,proto3" json:"client_key,omitempty"`
+	// days_until_expiry is a convenience for client poll schedulers —
+	// floor((NotAfter - now) / 24h). Clients typically renew when < 30 days.
+	DaysUntilExpiry int64 `protobuf:"varint,3,opt,name=days_until_expiry,json=daysUntilExpiry,proto3" json:"days_until_expiry,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *RenewCertResponse) Reset() {
+	*x = RenewCertResponse{}
+	mi := &file_proto_sluicev1_sluice_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RenewCertResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RenewCertResponse) ProtoMessage() {}
+
+func (x *RenewCertResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_sluicev1_sluice_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RenewCertResponse.ProtoReflect.Descriptor instead.
+func (*RenewCertResponse) Descriptor() ([]byte, []int) {
+	return file_proto_sluicev1_sluice_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *RenewCertResponse) GetClientCert() []byte {
+	if x != nil {
+		return x.ClientCert
+	}
+	return nil
+}
+
+func (x *RenewCertResponse) GetClientKey() []byte {
+	if x != nil {
+		return x.ClientKey
+	}
+	return nil
+}
+
+func (x *RenewCertResponse) GetDaysUntilExpiry() int64 {
+	if x != nil {
+		return x.DaysUntilExpiry
+	}
+	return 0
+}
+
+type RevokeClientRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// fingerprint: SHA-256 fingerprint of the client cert to revoke.
+	// Format: "sha256:" + lowercase hex, matching CertFingerprintSHA256 output.
+	Fingerprint string `protobuf:"bytes,1,opt,name=fingerprint,proto3" json:"fingerprint,omitempty"`
+	// reason: opaque string echoed back to audit logs. Optional.
+	Reason        string `protobuf:"bytes,2,opt,name=reason,proto3" json:"reason,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RevokeClientRequest) Reset() {
+	*x = RevokeClientRequest{}
+	mi := &file_proto_sluicev1_sluice_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RevokeClientRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RevokeClientRequest) ProtoMessage() {}
+
+func (x *RevokeClientRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_sluicev1_sluice_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RevokeClientRequest.ProtoReflect.Descriptor instead.
+func (*RevokeClientRequest) Descriptor() ([]byte, []int) {
+	return file_proto_sluicev1_sluice_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *RevokeClientRequest) GetFingerprint() string {
+	if x != nil {
+		return x.Fingerprint
+	}
+	return ""
+}
+
+func (x *RevokeClientRequest) GetReason() string {
+	if x != nil {
+		return x.Reason
+	}
+	return ""
+}
+
+type RevokeClientResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// revoked: true when the fingerprint was present in the active clients
+	// list and is now revoked. false when the fingerprint was already revoked
+	// or was never issued by this CA (idempotent behaviour).
+	Revoked bool `protobuf:"varint,1,opt,name=revoked,proto3" json:"revoked,omitempty"`
+	// active_clients: remaining unrevoked clients, for Culvert dashboards.
+	ActiveClients int32 `protobuf:"varint,2,opt,name=active_clients,json=activeClients,proto3" json:"active_clients,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RevokeClientResponse) Reset() {
+	*x = RevokeClientResponse{}
+	mi := &file_proto_sluicev1_sluice_proto_msgTypes[13]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RevokeClientResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RevokeClientResponse) ProtoMessage() {}
+
+func (x *RevokeClientResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_sluicev1_sluice_proto_msgTypes[13]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RevokeClientResponse.ProtoReflect.Descriptor instead.
+func (*RevokeClientResponse) Descriptor() ([]byte, []int) {
+	return file_proto_sluicev1_sluice_proto_rawDescGZIP(), []int{13}
+}
+
+func (x *RevokeClientResponse) GetRevoked() bool {
+	if x != nil {
+		return x.Revoked
+	}
+	return false
+}
+
+func (x *RevokeClientResponse) GetActiveClients() int32 {
+	if x != nil {
+		return x.ActiveClients
+	}
+	return 0
+}
+
 var File_proto_sluicev1_sluice_proto protoreflect.FileDescriptor
 
 const file_proto_sluicev1_sluice_proto_rawDesc = "" +
@@ -964,7 +1216,7 @@ const file_proto_sluicev1_sluice_proto_rawDesc = "" +
 	"\blocation\x18\x02 \x01(\tR\blocation\x12 \n" +
 	"\vdescription\x18\x03 \x01(\tR\vdescription\x12\x1a\n" +
 	"\bseverity\x18\x04 \x01(\tR\bseverity\"\x0f\n" +
-	"\rHealthRequest\"\xd8\x02\n" +
+	"\rHealthRequest\"\xfd\x03\n" +
 	"\x0eHealthResponse\x12\x18\n" +
 	"\ahealthy\x18\x01 \x01(\bR\ahealthy\x12\x18\n" +
 	"\aversion\x18\x02 \x01(\tR\aversion\x12'\n" +
@@ -976,7 +1228,11 @@ const file_proto_sluicev1_sluice_proto_rawDesc = "" +
 	"queueDepth\x12'\n" +
 	"\x0ffiles_processed\x18\a \x01(\x03R\x0efilesProcessed\x12'\n" +
 	"\x0fthreats_removed\x18\b \x01(\x03R\x0ethreatsRemoved\x12.\n" +
-	"\bprofiles\x18\t \x03(\v2\x12.sluice.v1.ProfileR\bprofiles\"\x92\x01\n" +
+	"\bprofiles\x18\t \x03(\v2\x12.sluice.v1.ProfileR\bprofiles\x12-\n" +
+	"\x12server_fingerprint\x18\n" +
+	" \x01(\tR\x11serverFingerprint\x12/\n" +
+	"\x13rotated_fingerprint\x18\v \x01(\tR\x12rotatedFingerprint\x12C\n" +
+	"\x1erotated_fingerprint_until_unix\x18\f \x01(\x03R\x1brotatedFingerprintUntilUnix\"\x92\x01\n" +
 	"\aProfile\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12 \n" +
 	"\vdescription\x18\x02 \x01(\tR\vdescription\x12\"\n" +
@@ -990,7 +1246,20 @@ const file_proto_sluicev1_sluice_proto_rawDesc = "" +
 	"clientCert\x12\x1d\n" +
 	"\n" +
 	"client_key\x18\x03 \x01(\fR\tclientKey\x12\x1a\n" +
-	"\bendpoint\x18\x04 \x01(\tR\bendpoint*<\n" +
+	"\bendpoint\x18\x04 \x01(\tR\bendpoint\"\x12\n" +
+	"\x10RenewCertRequest\"\x7f\n" +
+	"\x11RenewCertResponse\x12\x1f\n" +
+	"\vclient_cert\x18\x01 \x01(\fR\n" +
+	"clientCert\x12\x1d\n" +
+	"\n" +
+	"client_key\x18\x02 \x01(\fR\tclientKey\x12*\n" +
+	"\x11days_until_expiry\x18\x03 \x01(\x03R\x0fdaysUntilExpiry\"O\n" +
+	"\x13RevokeClientRequest\x12 \n" +
+	"\vfingerprint\x18\x01 \x01(\tR\vfingerprint\x12\x16\n" +
+	"\x06reason\x18\x02 \x01(\tR\x06reason\"W\n" +
+	"\x14RevokeClientResponse\x12\x18\n" +
+	"\arevoked\x18\x01 \x01(\bR\arevoked\x12%\n" +
+	"\x0eactive_clients\x18\x02 \x01(\x05R\ractiveClients*<\n" +
 	"\x04Mode\x12\v\n" +
 	"\aENFORCE\x10\x00\x12\x0f\n" +
 	"\vREPORT_ONLY\x10\x01\x12\x16\n" +
@@ -1000,11 +1269,13 @@ const file_proto_sluicev1_sluice_proto_rawDesc = "" +
 	"\tSANITIZED\x10\x01\x12\v\n" +
 	"\aBLOCKED\x10\x02\x12\t\n" +
 	"\x05ERROR\x10\x03\x12\x0f\n" +
-	"\vUNSUPPORTED\x10\x042\xd6\x01\n" +
+	"\vUNSUPPORTED\x10\x042\xef\x02\n" +
 	"\rSluiceService\x12G\n" +
 	"\bSanitize\x12\x1a.sluice.v1.SanitizeRequest\x1a\x1b.sluice.v1.SanitizeResponse(\x010\x01\x12=\n" +
 	"\x06Health\x12\x18.sluice.v1.HealthRequest\x1a\x19.sluice.v1.HealthResponse\x12=\n" +
-	"\x06Enroll\x12\x18.sluice.v1.EnrollRequest\x1a\x19.sluice.v1.EnrollResponseB+Z)github.com/KidCarmi/Sluice/proto/sluicev1b\x06proto3"
+	"\x06Enroll\x12\x18.sluice.v1.EnrollRequest\x1a\x19.sluice.v1.EnrollResponse\x12F\n" +
+	"\tRenewCert\x12\x1b.sluice.v1.RenewCertRequest\x1a\x1c.sluice.v1.RenewCertResponse\x12O\n" +
+	"\fRevokeClient\x12\x1e.sluice.v1.RevokeClientRequest\x1a\x1f.sluice.v1.RevokeClientResponseB+Z)github.com/KidCarmi/Sluice/proto/sluicev1b\x06proto3"
 
 var (
 	file_proto_sluicev1_sluice_proto_rawDescOnce sync.Once
@@ -1019,26 +1290,30 @@ func file_proto_sluicev1_sluice_proto_rawDescGZIP() []byte {
 }
 
 var file_proto_sluicev1_sluice_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_proto_sluicev1_sluice_proto_msgTypes = make([]protoimpl.MessageInfo, 11)
+var file_proto_sluicev1_sluice_proto_msgTypes = make([]protoimpl.MessageInfo, 15)
 var file_proto_sluicev1_sluice_proto_goTypes = []any{
-	(Mode)(0),                // 0: sluice.v1.Mode
-	(Status)(0),              // 1: sluice.v1.Status
-	(*SanitizeRequest)(nil),  // 2: sluice.v1.SanitizeRequest
-	(*SanitizeHeader)(nil),   // 3: sluice.v1.SanitizeHeader
-	(*SanitizeResponse)(nil), // 4: sluice.v1.SanitizeResponse
-	(*SanitizeResult)(nil),   // 5: sluice.v1.SanitizeResult
-	(*Threat)(nil),           // 6: sluice.v1.Threat
-	(*HealthRequest)(nil),    // 7: sluice.v1.HealthRequest
-	(*HealthResponse)(nil),   // 8: sluice.v1.HealthResponse
-	(*Profile)(nil),          // 9: sluice.v1.Profile
-	(*EnrollRequest)(nil),    // 10: sluice.v1.EnrollRequest
-	(*EnrollResponse)(nil),   // 11: sluice.v1.EnrollResponse
-	nil,                      // 12: sluice.v1.SanitizeHeader.TagsEntry
+	(Mode)(0),                    // 0: sluice.v1.Mode
+	(Status)(0),                  // 1: sluice.v1.Status
+	(*SanitizeRequest)(nil),      // 2: sluice.v1.SanitizeRequest
+	(*SanitizeHeader)(nil),       // 3: sluice.v1.SanitizeHeader
+	(*SanitizeResponse)(nil),     // 4: sluice.v1.SanitizeResponse
+	(*SanitizeResult)(nil),       // 5: sluice.v1.SanitizeResult
+	(*Threat)(nil),               // 6: sluice.v1.Threat
+	(*HealthRequest)(nil),        // 7: sluice.v1.HealthRequest
+	(*HealthResponse)(nil),       // 8: sluice.v1.HealthResponse
+	(*Profile)(nil),              // 9: sluice.v1.Profile
+	(*EnrollRequest)(nil),        // 10: sluice.v1.EnrollRequest
+	(*EnrollResponse)(nil),       // 11: sluice.v1.EnrollResponse
+	(*RenewCertRequest)(nil),     // 12: sluice.v1.RenewCertRequest
+	(*RenewCertResponse)(nil),    // 13: sluice.v1.RenewCertResponse
+	(*RevokeClientRequest)(nil),  // 14: sluice.v1.RevokeClientRequest
+	(*RevokeClientResponse)(nil), // 15: sluice.v1.RevokeClientResponse
+	nil,                          // 16: sluice.v1.SanitizeHeader.TagsEntry
 }
 var file_proto_sluicev1_sluice_proto_depIdxs = []int32{
 	3,  // 0: sluice.v1.SanitizeRequest.header:type_name -> sluice.v1.SanitizeHeader
 	0,  // 1: sluice.v1.SanitizeHeader.mode:type_name -> sluice.v1.Mode
-	12, // 2: sluice.v1.SanitizeHeader.tags:type_name -> sluice.v1.SanitizeHeader.TagsEntry
+	16, // 2: sluice.v1.SanitizeHeader.tags:type_name -> sluice.v1.SanitizeHeader.TagsEntry
 	5,  // 3: sluice.v1.SanitizeResponse.result:type_name -> sluice.v1.SanitizeResult
 	1,  // 4: sluice.v1.SanitizeResult.status:type_name -> sluice.v1.Status
 	6,  // 5: sluice.v1.SanitizeResult.threats_removed:type_name -> sluice.v1.Threat
@@ -1046,11 +1321,15 @@ var file_proto_sluicev1_sluice_proto_depIdxs = []int32{
 	2,  // 7: sluice.v1.SluiceService.Sanitize:input_type -> sluice.v1.SanitizeRequest
 	7,  // 8: sluice.v1.SluiceService.Health:input_type -> sluice.v1.HealthRequest
 	10, // 9: sluice.v1.SluiceService.Enroll:input_type -> sluice.v1.EnrollRequest
-	4,  // 10: sluice.v1.SluiceService.Sanitize:output_type -> sluice.v1.SanitizeResponse
-	8,  // 11: sluice.v1.SluiceService.Health:output_type -> sluice.v1.HealthResponse
-	11, // 12: sluice.v1.SluiceService.Enroll:output_type -> sluice.v1.EnrollResponse
-	10, // [10:13] is the sub-list for method output_type
-	7,  // [7:10] is the sub-list for method input_type
+	12, // 10: sluice.v1.SluiceService.RenewCert:input_type -> sluice.v1.RenewCertRequest
+	14, // 11: sluice.v1.SluiceService.RevokeClient:input_type -> sluice.v1.RevokeClientRequest
+	4,  // 12: sluice.v1.SluiceService.Sanitize:output_type -> sluice.v1.SanitizeResponse
+	8,  // 13: sluice.v1.SluiceService.Health:output_type -> sluice.v1.HealthResponse
+	11, // 14: sluice.v1.SluiceService.Enroll:output_type -> sluice.v1.EnrollResponse
+	13, // 15: sluice.v1.SluiceService.RenewCert:output_type -> sluice.v1.RenewCertResponse
+	15, // 16: sluice.v1.SluiceService.RevokeClient:output_type -> sluice.v1.RevokeClientResponse
+	12, // [12:17] is the sub-list for method output_type
+	7,  // [7:12] is the sub-list for method input_type
 	7,  // [7:7] is the sub-list for extension type_name
 	7,  // [7:7] is the sub-list for extension extendee
 	0,  // [0:7] is the sub-list for field type_name
@@ -1075,7 +1354,7 @@ func file_proto_sluicev1_sluice_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_sluicev1_sluice_proto_rawDesc), len(file_proto_sluicev1_sluice_proto_rawDesc)),
 			NumEnums:      2,
-			NumMessages:   11,
+			NumMessages:   15,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

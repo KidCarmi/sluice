@@ -314,7 +314,13 @@ func runCertCaRotate(args []string) int {
 	return 0
 }
 
-func runCertExpiry(_ []string) int {
+func runCertExpiry(args []string) int {
+	fs := flag.NewFlagSet("cert expiry", flag.ContinueOnError)
+	asJSON := fs.Bool("json", false, "emit JSON for scripting")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+
 	cfg := loadConfigOrDefault("config.yaml")
 	certPEM, err := os.ReadFile(filepath.Clean(cfg.Server.TLS.CertFile)) // #nosec G304 -- admin-provided
 	if err != nil {
@@ -323,11 +329,40 @@ func runCertExpiry(_ []string) int {
 	}
 	cn, _ := auth.CertCommonName(certPEM)
 	fp, _ := auth.CertFingerprintSHA256(certPEM)
-	// We don't have a direct "days until expiry" in auth — compute from
-	// a freshly-bootstrapped server cert validity window.
-	// TODO(v0.3): add auth.CertNotAfter helper.
-	fmt.Printf("common_name: %s\n", cn)
-	fmt.Printf("fingerprint: %s\n", fp)
+	notAfter, err := auth.CertNotAfter(certPEM)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "parsing server cert: %v\n", err)
+		return 1
+	}
+	daysRemaining := int64(time.Until(notAfter) / (24 * time.Hour))
+
+	if *asJSON {
+		payload := map[string]any{
+			"common_name":     cn,
+			"fingerprint":     fp,
+			"not_after":       notAfter.UTC().Format(time.RFC3339),
+			"not_after_unix":  notAfter.Unix(),
+			"days_remaining":  daysRemaining,
+		}
+		_ = json.NewEncoder(os.Stdout).Encode(payload)
+		return 0
+	}
+
+	fmt.Printf("common_name:    %s\n", cn)
+	fmt.Printf("fingerprint:    %s\n", fp)
+	fmt.Printf("not_after:      %s\n", notAfter.UTC().Format(time.RFC3339))
+	fmt.Printf("days_remaining: %d\n", daysRemaining)
+
+	// Advisory exit code so shell scripts can branch on cert health without
+	// parsing the output. Matches typical nagios-style conventions.
+	switch {
+	case daysRemaining < 0:
+		fmt.Fprintln(os.Stderr, "WARNING: server cert has EXPIRED — sluice cert server-rotate")
+		return 2
+	case daysRemaining < 14:
+		fmt.Fprintln(os.Stderr, "WARNING: server cert expires in < 14 days — rotate soon")
+		return 1
+	}
 	return 0
 }
 

@@ -65,8 +65,20 @@ One Sluice instance can enroll and serve an unlimited number of Culvert nodes �
 Starting point for capacity planning: **~10 Culvert nodes per Sluice vCPU**. Watch `sluice_queue_depth` in Prometheus; sustained non-zero queue depth means you're bottlenecked — add a Sluice instance and enroll each Culvert against both.
 
 There is no clustering. Sluice instances don't talk to each other. Each maintains its own CA and issues its own client certs. For an HA deploy, you either:
-- **Distribute a single CA** via your secret manager (Vault, sealed-secrets, etc.) so every Sluice issues certs from the same root, and Culvert trusts all of them identically.
-- **Let each Sluice have its own CA** and enroll each Culvert against each Sluice separately. More tokens to manage; trivial to reason about trust boundaries.
+
+- **Distribute a single CA across instances** — drop the same `ca.pem` + `ca-key.pem` into every Sluice's `/data/tls/` directory **before first boot**. `BootstrapServerCerts` detects the existing CA and reuses it to sign the local server cert. Every Culvert then enrolls once and trusts the whole fleet transparently. Typical pattern: generate the CA offline, store the key in your secret manager (Vault, sealed-secrets, AWS Secrets Manager), materialize it at pod start with an init container or CSI driver. Example:
+
+  ```bash
+  # One-time CA mint on a trusted machine
+  docker run --rm -v "$PWD:/out" --entrypoint /sluice \
+    ghcr.io/kidcarmi/sluice:latest version > /dev/null  # warm the image
+  # (today: cp your existing ca.pem + ca-key.pem into /data/tls/
+  #  before the sluice process ever starts)
+  ```
+
+  Planned for v0.3: a `sluice cert import-ca --cert ca.pem --key ca-key.pem` command so you don't have to stage files manually.
+
+- **Let each Sluice have its own CA** — enroll each Culvert against each Sluice separately (N enrollments per client). More tokens to manage; trivial to reason about trust boundaries. Recommended for most teams — blast radius of a single compromised CA is one Sluice instead of the whole fleet.
 
 ---
 
@@ -230,7 +242,7 @@ In addition to v0.1's `Sanitize`, `Health`, `Enroll`:
 
 ## Contract with Culvert
 
-The gRPC contract lives in `proto/sluicev1/sluice.proto`. Six RPCs (v0.2):
+The gRPC contract lives in `proto/sluicev1/sluice.proto`. Five RPCs (v0.2):
 
 | RPC | Kind | Auth |
 |---|---|---|

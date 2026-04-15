@@ -356,6 +356,14 @@ func randomSerial() (*big.Int, error) {
 	return rand.Int(rand.Reader, serialLimit)
 }
 
+// CertNotAfter decodes a PEM cert and returns its NotAfter timestamp.
+// Exported because the CLI's `sluice cert expiry` needs to compute
+// days-remaining without re-implementing x509 parsing.
+func CertNotAfter(certPEM []byte) (time.Time, error) {
+	notAfter, _, err := certValidityWindow(certPEM)
+	return notAfter, err
+}
+
 // certValidityWindow decodes a PEM cert and returns its (NotAfter, NotBefore).
 // Helper for RenewClient so callers don't re-parse the cert.
 func certValidityWindow(certPEM []byte) (notAfter, notBefore time.Time, err error) {

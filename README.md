@@ -242,6 +242,30 @@ In addition to v0.1's `Sanitize`, `Health`, `Enroll`:
 
 ## Contract with Culvert
 
+### Public Go packages
+
+Two packages are safe to import from client code (including Culvert):
+
+| Import | What's in it |
+|---|---|
+| `github.com/KidCarmi/Sluice/proto/sluicev1` | Generated gRPC stubs |
+| `github.com/KidCarmi/Sluice/pkg/sluiceauth` | Cert-inspection helpers for `EnrollResponse` / `RenewCertResponse` bundles: `NotAfter`, `Fingerprint`, `CommonName` |
+
+Everything under `internal/` is Sluice-internal and will not have a stable API — don't import it.
+
+```go
+import (
+    "github.com/KidCarmi/Sluice/pkg/sluiceauth"
+    pb "github.com/KidCarmi/Sluice/proto/sluicev1"
+)
+
+resp, _ := client.RenewCert(ctx, &pb.RenewCertRequest{})
+exp, _ := sluiceauth.NotAfter(resp.ClientCert)
+daysLeft := int(time.Until(exp).Hours() / 24)
+```
+
+### RPC contract
+
 The gRPC contract lives in `proto/sluicev1/sluice.proto`. Five RPCs (v0.2):
 
 | RPC | Kind | Auth |

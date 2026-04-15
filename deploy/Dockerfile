@@ -3,9 +3,14 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
+# Release builds override this via --build-arg VERSION=<tag-without-v>.
+# Local dev builds fall back to the value baked into cmd/sluice/main.go.
+ARG VERSION=dev
 # Strip debug info to shave ~30% off the binary (build reproducibility is
 # handled separately by the publish workflow).
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /sluice ./cmd/sluice
+RUN CGO_ENABLED=0 go build -trimpath \
+    -ldflags="-s -w -X main.version=${VERSION}" \
+    -o /sluice ./cmd/sluice
 
 # Pre-create /data with nonroot ownership so volumes mounted at /data are
 # writable by UID 65532 without extra init containers. Distroless has no

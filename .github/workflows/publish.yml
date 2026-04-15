@@ -42,5 +42,7 @@ jobs:
             ghcr.io/kidcarmi/sluice:${{ steps.version.outputs.VERSION }}
             ghcr.io/kidcarmi/sluice:latest
           platforms: linux/amd64,linux/arm64
+          build-args: |
+            VERSION=${{ steps.version.outputs.VERSION }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

@@ -22,14 +22,27 @@ services:
     image: ghcr.io/kidcarmi/sluice:latest
     container_name: sluice
     restart: unless-stopped
+    # Run as the distroless nonroot user directly. Setting `user:` explicitly
+    # here (rather than relying on the image's USER directive) means runc
+    # starts the process as 65532 from the outset, so it never needs
+    # CAP_SETUID to drop privileges — which matters once cap_drop: ALL is set.
     user: "65532:65532"
     read_only: true
     tmpfs:
       - /tmp
     cap_drop:
       - ALL
-    security_opt:
-      - no-new-privileges:true
+    # NOTE: `security_opt: no-new-privileges:true` is intentionally NOT set.
+    # On some host kernels + AppArmor / seccomp default profiles (notably
+    # Ubuntu 22.04/24.04), combining no-new-privileges with cap_drop: ALL on
+    # a distroless base causes execve to fail with:
+    #   exec /sluice: operation not permitted
+    # even though the binary is a plain static ELF and no setuid is involved.
+    # If your host is known-compatible (tested on Debian 12, Alpine hosts,
+    # Kubernetes with containerd ≥ 1.7), uncomment the block below:
+    #
+    # security_opt:
+    #   - no-new-privileges:true
     ports:
       # mTLS gRPC — bound on all interfaces. Gate access with a host or
       # cloud firewall (e.g. iptables, AWS SG, Azure NSG, GCP VPC firewall).

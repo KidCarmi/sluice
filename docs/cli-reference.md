@@ -141,7 +141,33 @@ compromised.
 
 ---
 
-## `sluice cert expiry`
+## `sluice cert expiry [--json]`
 
-Prints the current server cert's Common Name and SHA-256 fingerprint.
-(Days-until-expiry is on the v0.3 roadmap.)
+Prints the current server cert's Common Name, SHA-256 fingerprint,
+NotAfter timestamp, and days-remaining.
+
+Text output:
+```
+common_name:    Sluice Server
+fingerprint:    sha256:a1b2c3...
+not_after:      2027-04-14T12:34:56Z
+days_remaining: 347
+```
+
+JSON output (`--json`):
+```json
+{
+  "common_name":    "Sluice Server",
+  "fingerprint":    "sha256:a1b2c3...",
+  "not_after":      "2027-04-14T12:34:56Z",
+  "not_after_unix": 1807000096,
+  "days_remaining": 347
+}
+```
+
+**Exit codes:**
+- `0` — cert is healthy (≥ 14 days remaining)
+- `1` — cert expires in < 14 days (rotate soon)
+- `2` — cert has already expired (rotate immediately)
+
+Wire this into your monitoring to alert on `exit > 0`.

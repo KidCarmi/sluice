@@ -89,6 +89,29 @@ func TestCertFingerprintSHA256_InvalidPEM(t *testing.T) {
 	}
 }
 
+func TestCertNotAfter_ReturnsCertExpiry(t *testing.T) {
+	caCert, caKey, _ := GenerateCA()
+	clientCert, _, err := GenerateClientCertForCN(caCert, caKey, "test")
+	if err != nil {
+		t.Fatalf("GenerateClientCertForCN: %v", err)
+	}
+	notAfter, err := CertNotAfter(clientCert)
+	if err != nil {
+		t.Fatalf("CertNotAfter: %v", err)
+	}
+	// Client certs are 1-year. Allow 1 day of slop for boundary precision.
+	days := time.Until(notAfter) / (24 * time.Hour)
+	if days < 364 || days > 366 {
+		t.Errorf("expected ~365 days remaining, got %d", days)
+	}
+}
+
+func TestCertNotAfter_InvalidPEM(t *testing.T) {
+	if _, err := CertNotAfter([]byte("not a cert")); err == nil {
+		t.Error("expected error on garbage input")
+	}
+}
+
 // ---- BootstrapServerCerts ------------------------------------------------
 
 func TestBootstrap_CreatesAllFilesOnFirstCall(t *testing.T) {

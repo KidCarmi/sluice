@@ -3,6 +3,11 @@ services:
     image: ghcr.io/kidcarmi/sluice:latest
     container_name: culvert-sluice
     restart: unless-stopped
+    # Run as the distroless nonroot user directly, bypassing the runtime
+    # UID switch. Combined with cap_drop: ALL and no-new-privileges, runc
+    # would otherwise fail execve with EPERM because it can't setuid from
+    # root → nonroot without CAP_SETUID.
+    user: "65532:65532"
     read_only: true
     tmpfs:
       - /tmp
@@ -19,8 +24,6 @@ services:
       - sluice-data:/data
     environment:
       - TZ=UTC
-      # Override config values inline if you want — default config.yaml
-      # baked into the image already has testing_ui.enabled=false.
     healthcheck:
       test: ["CMD", "/sluice", "health"]
       interval: 30s

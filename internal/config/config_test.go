@@ -128,6 +128,20 @@ func TestDefaultSaneValues(t *testing.T) {
 		t.Error("Default PDF sanitization should be enabled")
 	}
 
+	// TLS file paths must be populated. When these were empty, main.go
+	// handed "" to BootstrapServerCerts, which filepath.Cleaned to ".",
+	// and os.ReadFile(".") failed with "is a directory" — sending the
+	// container into a restart loop on first boot without a config file.
+	if cfg.Server.TLS.CertFile == "" {
+		t.Error("Default tls.cert_file must not be empty")
+	}
+	if cfg.Server.TLS.KeyFile == "" {
+		t.Error("Default tls.key_file must not be empty")
+	}
+	if cfg.Server.TLS.CAFile == "" {
+		t.Error("Default tls.ca_file must not be empty")
+	}
+
 	// Defaults should pass validation.
 	if err := validate(cfg); err != nil {
 		t.Errorf("Default config should pass validation, got: %v", err)

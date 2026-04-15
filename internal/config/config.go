@@ -130,6 +130,14 @@ func Default() *Config {
 		Server: ServerConfig{
 			GRPCAddr: ":8443",
 			HTTPAddr: ":8080",
+			TLS: TLSConfig{
+				// Default TLS material lives under /data so it survives
+				// container restarts via the mounted volume. Bootstrap
+				// mints these on first boot if they don't exist.
+				CertFile: "/data/server.pem",
+				KeyFile:  "/data/server-key.pem",
+				CAFile:   "/data/ca.pem",
+			},
 		},
 		Workers: WorkersConfig{
 			MaxConcurrent: 10,
